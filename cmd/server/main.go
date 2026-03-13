@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	_ "time/tzdata"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
@@ -234,6 +235,8 @@ func main() {
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
 	if usePostgresStore {
+		legacyConfigPath := resolveLegacyConfigPath(wd, configPath)
+		legacyAuthDir := resolveLegacyAuthDir(legacyConfigPath)
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -251,9 +254,16 @@ func main() {
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+		if errBootstrap := pgStoreInst.BootstrapWithFileMigration(ctx, examplePath, legacyConfigPath, legacyAuthDir); errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
+			return
+		}
+		cancel()
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		if errUsage := usage.MigrateSQLiteToPostgres(ctx, pgStoreDSN, pgStoreSchema, legacyAuthDir); errUsage != nil {
+			cancel()
+			log.Errorf("failed to migrate legacy sqlite usage database: %v", errUsage)
 			return
 		}
 		cancel()
@@ -568,4 +578,37 @@ func main() {
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+func resolveLegacyConfigPath(wd, configPath string) string {
+	if trimmed := strings.TrimSpace(configPath); trimmed != "" {
+		return trimmed
+	}
+	return filepath.Join(wd, "config.yaml")
+}
+
+func resolveLegacyAuthDir(configPath string) string {
+	defaultPath, err := util.ResolveAuthDir("~/.cli-proxy-api")
+	if err != nil {
+		defaultPath = ""
+	}
+
+	trimmedConfigPath := strings.TrimSpace(configPath)
+	if trimmedConfigPath == "" {
+		return defaultPath
+	}
+	if _, err = os.Stat(trimmedConfigPath); err != nil {
+		return defaultPath
+	}
+
+	cfg, err := config.LoadConfigOptional(trimmedConfigPath, false)
+	if err != nil || cfg == nil {
+		return defaultPath
+	}
+
+	resolved, err := util.ResolveAuthDir(cfg.AuthDir)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return defaultPath
+	}
+	return resolved
 }

@@ -245,12 +245,12 @@ func TestGetMonitorRequestLogs_DatabasePluginPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	usage.CloseDatabasePlugin()
-	t.Cleanup(usage.CloseDatabasePlugin)
 
 	authDir := t.TempDir()
 	if err := usage.InitDatabasePlugin(context.Background(), "", "", authDir); err != nil {
 		t.Fatalf("InitDatabasePlugin failed: %v", err)
 	}
+	t.Cleanup(usage.CloseDatabasePlugin)
 	plugin := usage.GetDatabasePlugin()
 	if plugin == nil {
 		t.Fatalf("expected database plugin to be initialized")
@@ -379,9 +379,9 @@ func TestGetMonitorServiceHealth_BasicBucketing(t *testing.T) {
 	}
 
 	var resp struct {
-		Rows            int     `json:"rows"`
-		Cols            int     `json:"cols"`
-		BlockDurationMs int     `json:"block_duration_ms"`
+		Rows            int `json:"rows"`
+		Cols            int `json:"cols"`
+		BlockDurationMs int `json:"block_duration_ms"`
 		Blocks          []struct {
 			Success int64 `json:"success"`
 			Failure int64 `json:"failure"`

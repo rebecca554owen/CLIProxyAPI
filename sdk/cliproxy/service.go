@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
@@ -479,6 +480,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := s.ensureDefaults(); err != nil {
+		return err
+	}
 
 	usage.StartDefault(ctx)
 
@@ -776,6 +780,53 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+func (s *Service) ensureDefaults() error {
+	if s == nil {
+		return fmt.Errorf("cliproxy: service is nil")
+	}
+	if s.cfg == nil {
+		return fmt.Errorf("cliproxy: configuration is required")
+	}
+	if s.tokenProvider == nil {
+		s.tokenProvider = NewFileTokenClientProvider()
+	}
+	if s.apiKeyProvider == nil {
+		s.apiKeyProvider = NewAPIKeyClientProvider()
+	}
+	if s.watcherFactory == nil {
+		s.watcherFactory = defaultWatcherFactory
+	}
+	if s.authManager == nil {
+		s.authManager = newDefaultAuthManager()
+	}
+	if s.accessManager == nil {
+		s.accessManager = sdkaccess.NewManager()
+	}
+	configaccess.Register(&s.cfg.SDKConfig)
+	s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+	if s.coreManager == nil {
+		tokenStore := sdkAuth.GetTokenStore()
+		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(s.cfg.AuthDir)
+		}
+		strategy := strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+		var selector coreauth.Selector
+		switch strategy {
+		case "fill-first", "fillfirst", "ff":
+			selector = &coreauth.FillFirstSelector{}
+		case "sequential-fill", "sequentialfill", "sf":
+			selector = &coreauth.SequentialFillSelector{}
+		default:
+			selector = &coreauth.RoundRobinSelector{}
+		}
+		s.coreManager = coreauth.NewManager(tokenStore, selector, nil)
+	}
+	s.coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	s.coreManager.SetConfig(s.cfg)
+	s.coreManager.SetOAuthModelAlias(s.cfg.OAuthModelAlias)
+	return nil
 }
 
 func (s *Service) ensureAuthDir() error {
