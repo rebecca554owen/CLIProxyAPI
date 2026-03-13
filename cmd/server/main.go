@@ -26,13 +26,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	_ "time/tzdata"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
+	_ "time/tzdata"
 )
 
 var (
@@ -41,6 +41,8 @@ var (
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""
 )
+
+const usageMigrationTimeout = 5 * time.Minute
 
 // init initializes the shared logger setup.
 func init() {
@@ -260,7 +262,7 @@ func main() {
 			return
 		}
 		cancel()
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(), usageMigrationTimeout)
 		if errUsage := usage.MigrateSQLiteToPostgres(ctx, pgStoreDSN, pgStoreSchema, legacyAuthDir); errUsage != nil {
 			cancel()
 			log.Errorf("failed to migrate legacy sqlite usage database: %v", errUsage)

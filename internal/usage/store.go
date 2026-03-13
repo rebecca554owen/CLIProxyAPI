@@ -479,6 +479,12 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 	if len(records) == 0 {
 		return 0, 0, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err = ctx.Err(); err != nil {
+		return 0, 0, fmt.Errorf("usage store: insert batch context: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -501,6 +507,9 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 	defer stmt.Close()
 
 	for _, record := range records {
+		if err = ctx.Err(); err != nil {
+			return added, skipped, fmt.Errorf("usage store: insert batch context: %w", err)
+		}
 		failed := 0
 		if record.Failed {
 			failed = 1
@@ -527,7 +536,13 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 		added++
 	}
 
+	if err = ctx.Err(); err != nil {
+		return added, skipped, fmt.Errorf("usage store: insert batch context: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return added, skipped, fmt.Errorf("usage store: insert batch context: %w", ctxErr)
+		}
 		return 0, 0, fmt.Errorf("usage store: commit tx: %w", err)
 	}
 	return added, skipped, nil
