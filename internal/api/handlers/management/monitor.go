@@ -160,6 +160,11 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 1)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -170,7 +175,7 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		End:         end,
 	}
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		queryResult, queryErr := dbPlugin.QueryMonitorRequestLogs(c.Request.Context(), toUsageMonitorFilter(filter), page, pageSize, monitorRecentLimit)
 		if queryErr == nil {
 			items := make([]monitorRequestLogItem, 0, len(queryResult.Items))
@@ -302,6 +307,11 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -311,7 +321,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 	}
 	modelFilter := firstQuery(c, "model")
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		usageFilter := toUsageMonitorFilter(filter)
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 		usageFilter.Status = strings.TrimSpace(status)
@@ -490,6 +500,11 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -499,7 +514,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 	}
 	modelFilter := firstQuery(c, "model")
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		usageFilter := toUsageMonitorFilter(filter)
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 
@@ -841,6 +856,20 @@ func parseMonitorTimeRange(c *gin.Context) (*time.Time, *time.Time, error) {
 	return start, end, nil
 }
 
+func applyDefaultTimeRange(start, end *time.Time, defaultDays int) (*time.Time, *time.Time) {
+	if defaultDays <= 0 || start != nil || end != nil {
+		return start, end
+	}
+	now := time.Now()
+	startAt := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -(defaultDays - 1))
+	endAt := now
+	return &startAt, &endAt
+}
+
+func isExplicitAllTimeRange(c *gin.Context) bool {
+	return strings.EqualFold(strings.TrimSpace(firstQuery(c, "time_range", "timeRange", "range")), "all")
+}
+
 func parsePresetTimeRange(value string, now time.Time) (*time.Time, *time.Time, error) {
 	startOfDay := func(ts time.Time) time.Time {
 		return time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, ts.Location())
@@ -1119,6 +1148,11 @@ func (h *Handler) GetMonitorKpi(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -1127,6 +1161,39 @@ func (h *Handler) GetMonitorKpi(c *gin.Context) {
 		Status:      status,
 		Start:       start,
 		End:         end,
+	}
+
+	if dbPlugin != nil {
+		result, queryErr := dbPlugin.QueryMonitorKpi(c.Request.Context(), toUsageMonitorFilter(filter))
+		if queryErr == nil {
+			resp := monitorKpiResponse{
+				TotalRequests:   result.TotalRequests,
+				SuccessRequests: result.SuccessRequests,
+				FailedRequests:  result.FailedRequests,
+				TotalTokens:     result.TotalTokens,
+				InputTokens:     result.InputTokens,
+				OutputTokens:    result.OutputTokens,
+				ReasoningTokens: result.ReasoningTokens,
+				CachedTokens:    result.CachedTokens,
+				SuccessRate:     calcRate(result.SuccessRequests, result.TotalRequests),
+				TimeRange:       monitorTimeRange{Start: start, End: end},
+			}
+			if resp.TotalRequests > 0 && result.MinTimestamp != nil && result.MaxTimestamp != nil {
+				spanMinutes := result.MaxTimestamp.Sub(*result.MinTimestamp).Minutes()
+				if spanMinutes < 1 {
+					spanMinutes = 1
+				}
+				spanDays := spanMinutes / (60 * 24)
+				if spanDays < 1 {
+					spanDays = 1
+				}
+				resp.AvgTpm = math.Round(float64(resp.TotalTokens)/spanMinutes*10) / 10
+				resp.AvgRpm = math.Round(float64(resp.TotalRequests)/spanMinutes*10) / 10
+				resp.AvgRpd = math.Round(float64(resp.TotalRequests)/spanDays*10) / 10
+			}
+			c.JSON(http.StatusOK, resp)
+			return
+		}
 	}
 
 	var resp monitorKpiResponse
@@ -1188,6 +1255,11 @@ func (h *Handler) GetMonitorModelDistribution(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -1195,6 +1267,26 @@ func (h *Handler) GetMonitorModelDistribution(c *gin.Context) {
 		Source:      firstQuery(c, "source", "channel"),
 		Start:       start,
 		End:         end,
+	}
+
+	if dbPlugin != nil {
+		sortByTokens := strings.ToLower(firstQuery(c, "sort")) == "tokens"
+		result, queryErr := dbPlugin.QueryMonitorModelDistribution(c.Request.Context(), toUsageMonitorFilter(filter), limit, sortByTokens)
+		if queryErr == nil {
+			items := make([]monitorModelDistributionItem, 0, len(result))
+			for _, row := range result {
+				items = append(items, monitorModelDistributionItem{
+					Model:    row.Model,
+					Requests: row.Requests,
+					Tokens:   row.Tokens,
+				})
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"items":      items,
+				"time_range": monitorTimeRange{Start: start, End: end},
+			})
+			return
+		}
 	}
 
 	type modelAcc struct {
@@ -1260,6 +1352,11 @@ func (h *Handler) GetMonitorDailyTrend(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 30)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -1267,6 +1364,30 @@ func (h *Handler) GetMonitorDailyTrend(c *gin.Context) {
 		Source:      firstQuery(c, "source", "channel"),
 		Start:       start,
 		End:         end,
+	}
+
+	if dbPlugin != nil {
+		result, queryErr := dbPlugin.QueryMonitorDailyTrend(c.Request.Context(), toUsageMonitorFilter(filter))
+		if queryErr == nil {
+			items := make([]monitorDailyTrendItem, 0, len(result))
+			for _, row := range result {
+				items = append(items, monitorDailyTrendItem{
+					Date:            row.Date,
+					Requests:        row.Requests,
+					SuccessRequests: row.SuccessRequests,
+					FailedRequests:  row.FailedRequests,
+					InputTokens:     row.InputTokens,
+					OutputTokens:    row.OutputTokens,
+					ReasoningTokens: row.ReasoningTokens,
+					CachedTokens:    row.CachedTokens,
+				})
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"items":      items,
+				"time_range": monitorTimeRange{Start: start, End: end},
+			})
+			return
+		}
 	}
 
 	type dayAcc struct {
@@ -1365,6 +1486,73 @@ func (h *Handler) GetMonitorHourlyModels(c *gin.Context) {
 		hourSlots = append(hourSlots, key)
 	}
 	slotCount := len(hourSlots)
+
+	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+		slots, queryErr := dbPlugin.QueryMonitorHourlySlots(c.Request.Context(), toUsageMonitorFilter(filter), cutoff.Unix(), now.Unix(), 3600)
+		if queryErr == nil {
+			modelTotals := make(map[string]int64)
+			type slotModelKey struct {
+				slot  int
+				model string
+			}
+			slotModelCounts := make(map[slotModelKey]int64)
+			hourSuccess := make([]int64, slotCount)
+			hourTotal := make([]int64, slotCount)
+
+			for _, slot := range slots {
+				if slot.SlotIndex < 0 || slot.SlotIndex >= slotCount {
+					continue
+				}
+				modelTotals[slot.Model] += slot.Total
+				slotModelCounts[slotModelKey{slot: slot.SlotIndex, model: slot.Model}] = slot.Total
+				hourTotal[slot.SlotIndex] += slot.Total
+				hourSuccess[slot.SlotIndex] += slot.Success
+			}
+
+			type modelCount struct {
+				model string
+				count int64
+			}
+			mc := make([]modelCount, 0, len(modelTotals))
+			for m, cnt := range modelTotals {
+				mc = append(mc, modelCount{model: m, count: cnt})
+			}
+			sort.Slice(mc, func(i, j int) bool {
+				if mc[i].count == mc[j].count {
+					return mc[i].model < mc[j].model
+				}
+				return mc[i].count > mc[j].count
+			})
+			if len(mc) > limit {
+				mc = mc[:limit]
+			}
+
+			topModels := make([]string, len(mc))
+			modelData := make(map[string][]int64, len(mc))
+			for i, m := range mc {
+				topModels[i] = m.model
+				data := make([]int64, slotCount)
+				for si := range hourSlots {
+					data[si] = slotModelCounts[slotModelKey{slot: si, model: m.model}]
+				}
+				modelData[m.model] = data
+			}
+
+			successRates := make([]float64, slotCount)
+			for i := range hourSlots {
+				successRates[i] = calcRate(hourSuccess[i], hourTotal[i])
+			}
+
+			c.JSON(http.StatusOK, monitorHourlyModelsResponse{
+				Hours:        hourSlots,
+				Models:       topModels,
+				ModelData:    modelData,
+				SuccessRates: successRates,
+				TimeRange:    monitorTimeRange{Start: start, End: end},
+			})
+			return
+		}
+	}
 
 	// Per-hour per-model counts and per-hour success tracking
 	type hourModelKey struct {
@@ -1474,6 +1662,39 @@ func (h *Handler) GetMonitorHourlyTokens(c *gin.Context) {
 	}
 	slotCount := len(hourSlots)
 
+	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+		tokenSlots, queryErr := dbPlugin.QueryMonitorHourlyTokenSlots(c.Request.Context(), toUsageMonitorFilter(filter), cutoff.Unix(), now.Unix(), 3600)
+		if queryErr == nil {
+			totalTokens := make([]int64, slotCount)
+			inputTokens := make([]int64, slotCount)
+			outputTokens := make([]int64, slotCount)
+			reasoningTokens := make([]int64, slotCount)
+			cachedTokens := make([]int64, slotCount)
+
+			for _, slot := range tokenSlots {
+				if slot.SlotIndex < 0 || slot.SlotIndex >= slotCount {
+					continue
+				}
+				totalTokens[slot.SlotIndex] = slot.TotalTokens
+				inputTokens[slot.SlotIndex] = slot.InputTokens
+				outputTokens[slot.SlotIndex] = slot.OutputTokens
+				reasoningTokens[slot.SlotIndex] = slot.ReasoningTokens
+				cachedTokens[slot.SlotIndex] = slot.CachedTokens
+			}
+
+			c.JSON(http.StatusOK, monitorHourlyTokensResponse{
+				Hours:           hourSlots,
+				TotalTokens:     totalTokens,
+				InputTokens:     inputTokens,
+				OutputTokens:    outputTokens,
+				ReasoningTokens: reasoningTokens,
+				CachedTokens:    cachedTokens,
+				TimeRange:       monitorTimeRange{Start: start, End: end},
+			})
+			return
+		}
+	}
+
 	totalTokens := make([]int64, slotCount)
 	inputTokens := make([]int64, slotCount)
 	outputTokens := make([]int64, slotCount)
@@ -1547,6 +1768,34 @@ func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
 		Failure int64 `json:"failure"`
 	}
 
+	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+		healthBlocks, queryErr := dbPlugin.QueryMonitorHealthBlocks(c.Request.Context(), windowStart.Unix(), now.Unix(), int(blockDuration.Seconds()))
+		if queryErr == nil {
+			blocks := make([]healthBlock, totalBlocks)
+			var totalSuccess, totalFailure int64
+			for _, hb := range healthBlocks {
+				if hb.BlockIndex < 0 || hb.BlockIndex >= totalBlocks {
+					continue
+				}
+				blocks[hb.BlockIndex].Success = hb.Success
+				blocks[hb.BlockIndex].Failure = hb.Failure
+				totalSuccess += hb.Success
+				totalFailure += hb.Failure
+			}
+			total := totalSuccess + totalFailure
+			c.JSON(http.StatusOK, gin.H{
+				"rows":              rows,
+				"cols":              cols,
+				"block_duration_ms": blockDurationMs,
+				"blocks":            blocks,
+				"total_success":     totalSuccess,
+				"total_failure":     totalFailure,
+				"success_rate":      calcRate(totalSuccess, total),
+			})
+			return
+		}
+	}
+
 	blocks := make([]healthBlock, totalBlocks)
 	var totalSuccess, totalFailure int64
 
@@ -1615,6 +1864,29 @@ func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
 		return s
 	}
 
+	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+		rows, queryErr := dbPlugin.QueryMonitorKeyStatsBlocks(c.Request.Context(), windowStart.Unix(), now.Unix(), int(blockDuration.Seconds()))
+		if queryErr == nil {
+			for _, row := range rows {
+				if row.BlockIndex < 0 || row.BlockIndex >= blockCount {
+					continue
+				}
+				srcStats := ensureEntry(bySource, row.Source)
+				srcStats.Success += row.Success
+				srcStats.Failure += row.Failure
+				srcStats.Blocks[row.BlockIndex].Success += row.Success
+				srcStats.Blocks[row.BlockIndex].Failure += row.Failure
+
+				aiStats := ensureEntry(byAuthIndex, row.AuthIndex)
+				aiStats.Success += row.Success
+				aiStats.Failure += row.Failure
+				aiStats.Blocks[row.BlockIndex].Success += row.Success
+				aiStats.Blocks[row.BlockIndex].Failure += row.Failure
+			}
+			goto buildKeyStatsResponse
+		}
+	}
+
 	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
 		if record.Timestamp.Before(windowStart) || record.Timestamp.After(now) {
 			return
@@ -1649,6 +1921,7 @@ func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
 		}
 	})
 
+buildKeyStatsResponse:
 	sourceResp := make(map[string]keyStats, len(bySource))
 	for k, v := range bySource {
 		sourceResp[k] = *v
@@ -1681,7 +1954,8 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 		center = &parsed
 	}
 
-	windowSec, err := parseBoundedInt(firstQuery(c, "window_seconds", "window"), 300, 1, 86400)
+	windowRaw := firstQuery(c, "window_seconds", "window")
+	windowSec, err := parseBoundedInt(windowRaw, 300, 1, 86400)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1700,6 +1974,13 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 	if dbPlugin == nil {
 		c.JSON(http.StatusOK, gin.H{"items": []any{}})
 		return
+	}
+	if center == nil {
+		now := time.Now()
+		center = &now
+		if strings.TrimSpace(windowRaw) == "" {
+			windowSec = 86400
+		}
 	}
 
 	results, queryErr := dbPlugin.QueryMonitorRequestDetails(c.Request.Context(), center, windowSec, method, path, limit)

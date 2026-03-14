@@ -279,7 +279,9 @@ func TestGetMonitorRequestLogs_DatabasePluginPath(t *testing.T) {
 	}
 
 	h := &Handler{usageStats: usage.NewRequestStatistics()}
-	rr := executeMonitorRequest(h.GetMonitorRequestLogs, "/monitor/request-logs?api=api-db&page=1&page_size=1")
+	startQuery := url.QueryEscape(base.Add(-3 * time.Hour).Format(time.RFC3339))
+	endQuery := url.QueryEscape(base.Add(1 * time.Hour).Format(time.RFC3339))
+	rr := executeMonitorRequest(h.GetMonitorRequestLogs, "/monitor/request-logs?api=api-db&page=1&page_size=1&start_time="+startQuery+"&end_time="+endQuery)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
 	}

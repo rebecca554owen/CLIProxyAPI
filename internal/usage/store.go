@@ -377,6 +377,13 @@ func (s *pgUsageStore) fullTableName(name string) string {
 	return quoteIdentifier(s.schema) + "." + quoteIdentifier(name)
 }
 
+func (s *pgUsageStore) fullIndexName(name string) string {
+	if s.schema == "" {
+		return quoteIdentifier(name)
+	}
+	return quoteIdentifier(s.schema) + "." + quoteIdentifier(name)
+}
+
 func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 	if s.schema != "" {
 		query := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(s.schema))
@@ -407,14 +414,27 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 
 	// Create indexes for common query patterns
 	indexes := []string{
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_requested_at ON %s(requested_at DESC)", table),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_api_key ON %s(api_key)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_requested_at_id ON %s(requested_at DESC, id DESC)", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_api_model ON %s(api_key, model)", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed ON %s(failed) WHERE failed = 1", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed_requested_source ON %s(requested_at DESC, source) WHERE failed = 1", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_requested_id ON %s(source, requested_at DESC, id DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_model_requested_id ON %s(source, model, requested_at DESC, id DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_norm_requested ON %s((COALESCE(NULLIF(source, ''), 'unknown')), requested_at DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_norm_model_requested ON %s((COALESCE(NULLIF(source, ''), 'unknown')), model, requested_at DESC)", table),
 	}
 	for _, idx := range indexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("usage store: create index: %w", err)
+		}
+	}
+	legacyIndexes := []string{
+		fmt.Sprintf("DROP INDEX IF EXISTS %s", s.fullIndexName("idx_usage_requested_at")),
+		fmt.Sprintf("DROP INDEX IF EXISTS %s", s.fullIndexName("idx_usage_api_key")),
+	}
+	for _, dropStmt := range legacyIndexes {
+		if _, err := s.db.ExecContext(ctx, dropStmt); err != nil {
+			return fmt.Errorf("usage store: drop legacy index: %w", err)
 		}
 	}
 
@@ -426,6 +446,15 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 	for _, m := range pgMigrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
 			return fmt.Errorf("usage store: migration: %w", err)
+		}
+	}
+	postMigrationIndexes := []string{
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_method_requested_at ON %s(method, requested_at DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON %s(path, requested_at DESC)", table),
+	}
+	for _, idx := range postMigrationIndexes {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("usage store: create post migration index: %w", err)
 		}
 	}
 
@@ -719,33 +748,8 @@ func (s *pgUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedStats,
 		stats.TokensByHour[hour] = tokens
 	}
 
-	// All request details
-	queryDetails := fmt.Sprintf(`
-		SELECT api_key, model, source, auth_index, failed, requested_at,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
-		FROM %s ORDER BY requested_at DESC
-	`, table)
-	rows, err = s.db.QueryContext(ctx, queryDetails)
-	if err != nil {
-		return stats, fmt.Errorf("usage store: query details: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var detail DetailRecord
-		var failed int
-		if err = rows.Scan(
-			&detail.APIKey, &detail.Model, &detail.Source, &detail.AuthIndex,
-			&failed, &detail.RequestedAt,
-			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
-			&detail.CachedTokens, &detail.TotalTokens,
-		); err != nil {
-			return stats, fmt.Errorf("usage store: scan detail: %w", err)
-		}
-		detail.Failed = (failed != 0)
-		stats.Details = append(stats.Details, detail)
-	}
-
-	stats.DetailCount = int64(len(stats.Details))
+	// DetailCount only — full Details are available via GetDetails (paginated).
+	stats.DetailCount = stats.TotalRequests
 
 	return stats, nil
 }
@@ -847,6 +851,17 @@ func newSQLiteUsageStoreAtPath(dbPath string) (*sqliteUsageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage store: enable WAL: %w", err)
 	}
+	// Read performance PRAGMAs: 64MB cache, 256MB mmap, temp tables in memory
+	for _, pragma := range []string{
+		"PRAGMA cache_size=-64000",
+		"PRAGMA mmap_size=268435456",
+		"PRAGMA temp_store=MEMORY",
+	} {
+		if _, err = db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage store: set pragma: %w", err)
+		}
+	}
 	store := &sqliteUsageStore{db: db, path: cleanPath}
 	if err = store.EnsureSchema(context.Background()); err != nil {
 		_ = db.Close()
@@ -878,16 +893,27 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 
 	// Create indexes for common query patterns
 	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_usage_requested_at ON usage_records(requested_at DESC)",
-		"CREATE INDEX IF NOT EXISTS idx_usage_api_key ON usage_records(api_key)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_requested_at_id ON usage_records(requested_at DESC, id DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_api_model ON usage_records(api_key, model)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_failed ON usage_records(failed)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_failed_requested_source ON usage_records(requested_at DESC, source) WHERE failed = 1",
 		"CREATE INDEX IF NOT EXISTS idx_usage_source_requested ON usage_records(source, requested_at DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_source_model_requested ON usage_records(source, model, requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_source_norm_requested ON usage_records((COALESCE(NULLIF(source, ''), 'unknown')), requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_source_norm_model_requested ON usage_records((COALESCE(NULLIF(source, ''), 'unknown')), model, requested_at DESC)",
 	}
 	for _, idx := range indexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("usage store: create index: %w", err)
+		}
+	}
+	legacyIndexes := []string{
+		"DROP INDEX IF EXISTS idx_usage_requested_at",
+		"DROP INDEX IF EXISTS idx_usage_api_key",
+	}
+	for _, dropStmt := range legacyIndexes {
+		if _, err := s.db.ExecContext(ctx, dropStmt); err != nil {
+			return fmt.Errorf("usage store: drop legacy index: %w", err)
 		}
 	}
 
@@ -898,6 +924,15 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 	}
 	for _, m := range migrations {
 		_, _ = s.db.ExecContext(ctx, m) // ignore "duplicate column" errors
+	}
+	postMigrationIndexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_usage_method_requested_at ON usage_records(method, requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON usage_records(path, requested_at DESC)",
+	}
+	for _, idx := range postMigrationIndexes {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("usage store: create post migration index: %w", err)
+		}
 	}
 
 	return nil
@@ -1118,35 +1153,8 @@ func (s *sqliteUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedSt
 		stats.TokensByHour[hour] = tokens
 	}
 
-	// All request details
-	queryDetails := `
-		SELECT api_key, model, source, auth_index, failed, requested_at,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
-		FROM usage_records ORDER BY requested_at DESC
-	`
-	rows, err = s.db.QueryContext(ctx, queryDetails)
-	if err != nil {
-		return stats, fmt.Errorf("usage store: query details: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var detail DetailRecord
-		var failed int
-		var unixTime int64
-		if err = rows.Scan(
-			&detail.APIKey, &detail.Model, &detail.Source, &detail.AuthIndex,
-			&failed, &unixTime,
-			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
-			&detail.CachedTokens, &detail.TotalTokens,
-		); err != nil {
-			return stats, fmt.Errorf("usage store: scan detail: %w", err)
-		}
-		detail.Failed = (failed != 0)
-		detail.RequestedAt = time.Unix(unixTime, 0)
-		stats.Details = append(stats.Details, detail)
-	}
-
-	stats.DetailCount = int64(len(stats.Details))
+	// DetailCount only — full Details are available via GetDetails (paginated).
+	stats.DetailCount = stats.TotalRequests
 
 	return stats, nil
 }
