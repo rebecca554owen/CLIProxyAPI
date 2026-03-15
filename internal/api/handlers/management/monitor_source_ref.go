@@ -189,7 +189,7 @@ func buildAuthMonitorSourceRef(auth *coreauth.Auth) monitorSourceRef {
 		Kind:            "auth-file",
 		ProviderType:    providerType,
 		AuthIndex:       authIndex,
-		ConfigPath:      "/oauth",
+		ConfigPath:      "/auth-files",
 		CanonicalSource: strings.TrimSpace(authPrimarySource(auth)),
 		DisplayName:     providerDisplayName(providerType),
 		DisplaySecret:   displaySecret,
@@ -198,7 +198,7 @@ func buildAuthMonitorSourceRef(auth *coreauth.Auth) monitorSourceRef {
 		CanEdit:         true,
 		CanToggle:       true,
 		CopyValue:       copyValue,
-		EditPath:        "/oauth",
+		EditPath:        "/auth-files",
 		AuthFileName:    fileName,
 	}
 }
