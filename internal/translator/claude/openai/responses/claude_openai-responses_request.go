@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -343,10 +344,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-			if n := tool.Get("name"); n.Exists() {
-				tJSON, _ = sjson.SetBytes(tJSON, "name", n.String())
+			name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+			if !ok {
+				return true
 			}
+			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
+			tJSON, _ = sjson.SetBytes(tJSON, "name", name)
 			if d := tool.Get("description"); d.Exists() {
 				tJSON, _ = sjson.SetBytes(tJSON, "description", d.String())
 			}
@@ -379,7 +382,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 		case gjson.JSON:
 			if toolChoice.Get("type").String() == "function" {
-				fn := toolChoice.Get("function.name").String()
+				fn, ok := util.NormalizeRequestToolName(toolChoice.Get("function.name").String(), nil)
+				if !ok {
+					break
+				}
 				toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
