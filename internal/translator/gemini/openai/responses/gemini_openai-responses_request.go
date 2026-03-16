@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -373,11 +374,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
-				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
-
-				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
+				name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+				if !ok {
+					return true
 				}
+				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
+				funcDecl, _ = sjson.Set(funcDecl, "name", name)
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
 				}

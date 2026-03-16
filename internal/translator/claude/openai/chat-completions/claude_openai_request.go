@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -277,8 +278,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
+				name, ok := util.NormalizeRequestToolName(function.Get("name").String(), nil)
+				if !ok {
+					return true
+				}
 				anthropicTool := `{"name":"","description":""}`
-				anthropicTool, _ = sjson.Set(anthropicTool, "name", function.Get("name").String())
+				anthropicTool, _ = sjson.Set(anthropicTool, "name", name)
 				anthropicTool, _ = sjson.Set(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
@@ -315,7 +320,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		case gjson.JSON:
 			// Specific tool choice mapping
 			if toolChoice.Get("type").String() == "function" {
-				functionName := toolChoice.Get("function.name").String()
+				functionName, ok := util.NormalizeRequestToolName(toolChoice.Get("function.name").String(), nil)
+				if !ok {
+					break
+				}
 				toolChoiceJSON := `{"type":"tool","name":""}`
 				toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)

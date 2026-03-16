@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -284,7 +285,11 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			openAIToolJSON := `{"type":"function","function":{"name":"","description":""}}`
-			openAIToolJSON, _ = sjson.Set(openAIToolJSON, "function.name", tool.Get("name").String())
+			name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+			if !ok {
+				return true
+			}
+			openAIToolJSON, _ = sjson.Set(openAIToolJSON, "function.name", name)
 			openAIToolJSON, _ = sjson.Set(openAIToolJSON, "function.description", tool.Get("description").String())
 
 			// Convert Anthropic input_schema to OpenAI function parameters
@@ -310,7 +315,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			out, _ = sjson.Set(out, "tool_choice", "required")
 		case "tool":
 			// Specific tool choice
-			toolName := toolChoice.Get("name").String()
+			toolName, ok := util.NormalizeRequestToolName(toolChoice.Get("name").String(), nil)
+			if !ok {
+				break
+			}
 			toolChoiceJSON := `{"type":"function","function":{"name":""}}`
 			toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "function.name", toolName)
 			out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)

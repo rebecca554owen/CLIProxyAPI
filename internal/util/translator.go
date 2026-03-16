@@ -271,3 +271,17 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 	}
 	return name
 }
+
+// NormalizeRequestToolName trims request-side tool names and optionally restores mapped casing.
+// It returns ok=false when the name is empty after normalization and should be omitted from output.
+func NormalizeRequestToolName(name string, toolNameMap map[string]string) (normalized string, ok bool) {
+	normalized = strings.TrimSpace(name)
+	if normalized == "" {
+		return "", false
+	}
+	normalized = strings.TrimSpace(MapToolName(toolNameMap, normalized))
+	if normalized == "" {
+		return "", false
+	}
+	return normalized, true
+}
