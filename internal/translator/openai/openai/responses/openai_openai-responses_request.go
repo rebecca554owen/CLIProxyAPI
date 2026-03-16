@@ -161,12 +161,18 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
+			// Chat Completions 这里只接受 function tools。
+			// 内建工具或异常对象一律忽略，避免生成空 name 的非法 function tool。
+			if !tool.IsObject() {
+				return true
+			}
+			toolType := strings.TrimSpace(tool.Get("type").String())
+			if toolType != "function" {
+				return true
+			}
+
+			name := strings.TrimSpace(tool.Get("name").String())
+			if name == "" {
 				return true
 			}
 
@@ -174,10 +180,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			// Convert tool structure from responses format to chat completions format
 			function := `{"name":"","description":"","parameters":{}}`
-
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.Set(function, "name", name.String())
-			}
+			function, _ = sjson.Set(function, "name", name)
 
 			if description := tool.Get("description"); description.Exists() {
 				function, _ = sjson.Set(function, "description", description.String())

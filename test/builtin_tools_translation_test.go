@@ -46,3 +46,25 @@ func TestOpenAIResponsesToOpenAI_IgnoresBuiltinTools(t *testing.T) {
 		t.Fatalf("expected 0 tools (builtin tools not supported in Chat Completions), got %d: %s", got, string(out))
 	}
 }
+
+func TestOpenAIResponsesToOpenAI_IgnoresMalformedToolsWithoutFunctionTypeOrName(t *testing.T) {
+	in := []byte(`{
+		"model":"gpt-5",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[
+			{"type":"function","name":"valid_tool","parameters":{"type":"object"}},
+			{"type":"web_search","search_context_size":"low"},
+			{"name":""},
+			{"type":"function","name":"   "}
+		]
+	}`)
+
+	out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "gpt-5", in, false)
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("expected only 1 valid function tool, got %d: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "valid_tool" {
+		t.Fatalf("expected valid tool name, got %q: %s", got, string(out))
+	}
+}
