@@ -93,11 +93,10 @@ const (
 )
 
 // NewUsageStore creates a UsageStore based on environment configuration.
-// If pgDSN is provided, it uses PostgreSQL for writes and a local SQLite mirror for reads;
-// otherwise it uses SQLite in authDir directly.
+// If pgDSN is provided, it uses PostgreSQL directly; otherwise it uses SQLite in authDir directly.
 func NewUsageStore(ctx context.Context, pgDSN, pgSchema, authDir string) (UsageStore, error) {
 	if strings.TrimSpace(pgDSN) != "" {
-		return newMirrorUsageStore(ctx, pgDSN, pgSchema, authDir)
+		return newPgUsageStore(ctx, pgDSN, pgSchema)
 	}
 	return newSQLiteUsageStore(authDir)
 }
