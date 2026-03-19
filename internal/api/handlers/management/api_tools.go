@@ -50,12 +50,22 @@ type apiCallRequest struct {
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
 	Data            string            `json:"data"`
+	Proxy           string            `json:"proxy"`
+	Stream          bool              `json:"stream"`
 }
 
 type apiCallResponse struct {
 	StatusCode int                 `json:"status_code"`
 	Header     map[string][]string `json:"header"`
 	Body       string              `json:"body"`
+}
+
+type apiCallStreamEvent struct {
+	Type       string              `json:"type"`
+	StatusCode int                 `json:"status_code,omitempty"`
+	Header     map[string][]string `json:"header,omitempty"`
+	Chunk      string              `json:"chunk,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 // APICall makes a generic HTTP request on behalf of the management API caller.
@@ -191,7 +201,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.Transport = h.apiCallTransportWithOverride(auth, body.Proxy)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -204,6 +214,48 @@ func (h *Handler) APICall(c *gin.Context) {
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
+
+	if body.Stream {
+		c.Writer.Header().Set("Content-Type", "application/x-ndjson")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Status(http.StatusOK)
+
+		writeEvent := func(v any) bool {
+			data, errMarshal := json.Marshal(v)
+			if errMarshal != nil {
+				return false
+			}
+			data = append(data, '\n')
+			if _, errWrite := c.Writer.Write(data); errWrite != nil {
+				return false
+			}
+			c.Writer.Flush()
+			return true
+		}
+
+		if !writeEvent(apiCallStreamEvent{Type: "response", StatusCode: resp.StatusCode, Header: resp.Header}) {
+			return
+		}
+
+		buf := make([]byte, 4096)
+		for {
+			n, errRead := resp.Body.Read(buf)
+			if n > 0 {
+				if !writeEvent(apiCallStreamEvent{Type: "chunk", Chunk: string(buf[:n])}) {
+					return
+				}
+			}
+			if errRead == io.EOF {
+				_ = writeEvent(apiCallStreamEvent{Type: "done"})
+				return
+			}
+			if errRead != nil {
+				_ = writeEvent(apiCallStreamEvent{Type: "error", Error: "failed to read response"})
+				return
+			}
+		}
+	}
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
@@ -634,7 +686,14 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
+	return h.apiCallTransportWithOverride(auth, "")
+}
+
+func (h *Handler) apiCallTransportWithOverride(auth *coreauth.Auth, proxyOverride string) http.RoundTripper {
 	var proxyCandidates []string
+	if proxyStr := strings.TrimSpace(proxyOverride); proxyStr != "" {
+		proxyCandidates = append(proxyCandidates, proxyStr)
+	}
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
