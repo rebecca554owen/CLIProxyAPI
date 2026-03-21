@@ -92,6 +92,44 @@ type Service struct {
 	wsGateway *wsrelay.Manager
 }
 
+type serviceAuthHook struct {
+	service *Service
+}
+
+func (h serviceAuthHook) OnAuthRegistered(ctx context.Context, auth *coreauth.Auth) {
+	h.syncAuthState(ctx, auth)
+}
+
+func (h serviceAuthHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth) {
+	h.syncAuthState(ctx, auth)
+}
+
+func (serviceAuthHook) OnResult(context.Context, coreauth.Result) {}
+
+func (h serviceAuthHook) syncAuthState(_ context.Context, auth *coreauth.Auth) {
+	if h.service == nil || h.service.coreManager == nil || auth == nil || auth.ID == "" {
+		return
+	}
+	h.service.ensureExecutorsForAuth(auth)
+	h.service.registerModelsForAuth(auth)
+	h.service.coreManager.RefreshSchedulerEntry(auth.ID)
+}
+
+func (s *Service) syncLoadedAuthModels() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	auths := s.coreManager.List()
+	for _, auth := range auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.ensureExecutorsForAuth(auth)
+		s.registerModelsForAuth(auth)
+		s.coreManager.RefreshSchedulerEntry(auth.ID)
+	}
+}
+
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
 //
@@ -532,6 +570,8 @@ func (s *Service) Run(ctx context.Context) error {
 		apiKeyResult = &APIKeyClientResult{}
 	}
 
+	s.syncLoadedAuthModels()
+
 	// legacy clients removed; no caches to refresh
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
@@ -852,7 +892,7 @@ func (s *Service) ensureDefaults() error {
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
-		s.coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		s.coreManager = coreauth.NewManager(tokenStore, selector, serviceAuthHook{service: s})
 	}
 	s.coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	s.coreManager.SetConfig(s.cfg)
