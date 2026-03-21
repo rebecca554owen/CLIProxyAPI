@@ -773,7 +773,7 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
-// allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
+// allows multiple names to share the same alias, and ensures names are unique within each channel.
 func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return
@@ -784,7 +784,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		if channel == "" || len(aliases) == 0 {
 			continue
 		}
-		seenAlias := make(map[string]struct{}, len(aliases))
+		seenName := make(map[string]struct{}, len(aliases))
 		clean := make([]OAuthModelAlias, 0, len(aliases))
 		for _, entry := range aliases {
 			name := strings.TrimSpace(entry.Name)
@@ -795,11 +795,11 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(alias)
-			if _, ok := seenAlias[aliasKey]; ok {
+			nameKey := strings.ToLower(name)
+			if _, ok := seenName[nameKey]; ok {
 				continue
 			}
-			seenAlias[aliasKey] = struct{}{}
+			seenName[nameKey] = struct{}{}
 			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
 		}
 		if len(clean) > 0 {
