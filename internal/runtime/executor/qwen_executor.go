@@ -360,6 +360,10 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, err = ensureQwenSystemMessage(body)
+	body, _, _, err = normalizeThinkingHistory(body, "openai")
+	if err != nil {
+		return resp, err
+	}
 	if err != nil {
 		return resp, err
 	}
@@ -494,6 +498,10 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, err = ensureQwenSystemMessage(body)
+	body, _, _, err = normalizeThinkingHistory(body, "openai")
+	if err != nil {
+		return nil, err
+	}
 	if err != nil {
 		return nil, err
 	}
