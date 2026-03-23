@@ -186,6 +186,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var partsJSON []string
 				hasImage := false
 				hasFile := false
+				hasThinking := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -279,11 +280,19 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						role = "user"
 					}
 				}
+				if role == "assistant" {
+					if reasoning := strings.TrimSpace(item.Get("reasoning_content").String()); reasoning != "" {
+						thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
+						thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", reasoning)
+						partsJSON = append([]string{string(thinkingPart)}, partsJSON...)
+						hasThinking = true
+					}
+				}
 
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile {
+					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasThinking {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.DeleteBytes(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])
