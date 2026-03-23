@@ -30,42 +30,42 @@ import (
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 	// Start with empty JSON object
-	out := `{"instructions":""}`
+	out := []byte(`{"instructions":""}`)
 
 	// Stream must be set to true
-	out, _ = sjson.Set(out, "stream", stream)
+	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// Codex not support temperature, top_p, top_k, max_output_tokens, so comment them
 	// if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
-	// 	out, _ = sjson.Set(out, "temperature", v.Value())
+	// 	out, _ = sjson.SetBytes(out, "temperature", v.Value())
 	// }
 	// if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
-	// 	out, _ = sjson.Set(out, "top_p", v.Value())
+	// 	out, _ = sjson.SetBytes(out, "top_p", v.Value())
 	// }
 	// if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() {
-	// 	out, _ = sjson.Set(out, "top_k", v.Value())
+	// 	out, _ = sjson.SetBytes(out, "top_k", v.Value())
 	// }
 
 	// Map token limits
 	// if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() {
-	// 	out, _ = sjson.Set(out, "max_output_tokens", v.Value())
+	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
 	// }
 	// if v := gjson.GetBytes(rawJSON, "max_completion_tokens"); v.Exists() {
-	// 	out, _ = sjson.Set(out, "max_output_tokens", v.Value())
+	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
 	// }
 
 	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
-		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
+		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
 	} else {
-		out, _ = sjson.Set(out, "reasoning.effort", "medium")
+		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
-	out, _ = sjson.Set(out, "parallel_tool_calls", true)
-	out, _ = sjson.Set(out, "reasoning.summary", "auto")
-	out, _ = sjson.Set(out, "include", []string{"reasoning.encrypted_content"})
+	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
+	out, _ = sjson.SetBytes(out, "reasoning.summary", "auto")
+	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})
 
 	// Model
-	out, _ = sjson.Set(out, "model", modelName)
+	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Build tool name shortening map from original tools (if any)
 	originalToolNameMap := map[string]string{}
@@ -101,9 +101,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// 		if m.Get("role").String() == "system" {
 	// 			c := m.Get("content")
 	// 			if c.Type == gjson.String {
-	// 				out, _ = sjson.Set(out, "instructions", c.String())
+	// 				out, _ = sjson.SetBytes(out, "instructions", c.String())
 	// 			} else if c.IsObject() && c.Get("type").String() == "text" {
-	// 				out, _ = sjson.Set(out, "instructions", c.Get("text").String())
+	// 				out, _ = sjson.SetBytes(out, "instructions", c.Get("text").String())
 	// 			}
 	// 			break
 	// 		}
@@ -111,7 +111,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// }
 
 	// Build input from messages, handling all message types including tool calls
-	out, _ = sjson.SetRaw(out, "input", `[]`)
+	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
 	if messages.IsArray() {
 		arr := messages.Array()
 		for i := 0; i < len(arr); i++ {
@@ -125,23 +125,23 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				content := m.Get("content").String()
 
 				// Create function_call_output object
-				funcOutput := `{}`
-				funcOutput, _ = sjson.Set(funcOutput, "type", "function_call_output")
-				funcOutput, _ = sjson.Set(funcOutput, "call_id", toolCallID)
-				funcOutput, _ = sjson.Set(funcOutput, "output", content)
-				out, _ = sjson.SetRaw(out, "input.-1", funcOutput)
+				funcOutput := []byte(`{}`)
+				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
+				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
+				funcOutput, _ = sjson.SetBytes(funcOutput, "output", content)
+				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
 
 			default:
 				// Handle regular messages
-				msg := `{}`
-				msg, _ = sjson.Set(msg, "type", "message")
+				msg := []byte(`{}`)
+				msg, _ = sjson.SetBytes(msg, "type", "message")
 				if role == "system" {
-					msg, _ = sjson.Set(msg, "role", "developer")
+					msg, _ = sjson.SetBytes(msg, "role", "developer")
 				} else {
-					msg, _ = sjson.Set(msg, "role", role)
+					msg, _ = sjson.SetBytes(msg, "role", role)
 				}
 
-				msg, _ = sjson.SetRaw(msg, "content", `[]`)
+				msg, _ = sjson.SetRawBytes(msg, "content", []byte(`[]`))
 
 				// Handle regular content
 				c := m.Get("content")
@@ -151,10 +151,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					if role == "assistant" {
 						partType = "output_text"
 					}
-					part := `{}`
-					part, _ = sjson.Set(part, "type", partType)
-					part, _ = sjson.Set(part, "text", c.String())
-					msg, _ = sjson.SetRaw(msg, "content.-1", part)
+					part := []byte(`{}`)
+					part, _ = sjson.SetBytes(part, "type", partType)
+					part, _ = sjson.SetBytes(part, "text", c.String())
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 				} else if c.Exists() && c.IsArray() {
 					items := c.Array()
 					for j := 0; j < len(items); j++ {
@@ -166,32 +166,32 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							if role == "assistant" {
 								partType = "output_text"
 							}
-							part := `{}`
-							part, _ = sjson.Set(part, "type", partType)
-							part, _ = sjson.Set(part, "text", it.Get("text").String())
-							msg, _ = sjson.SetRaw(msg, "content.-1", part)
+							part := []byte(`{}`)
+							part, _ = sjson.SetBytes(part, "type", partType)
+							part, _ = sjson.SetBytes(part, "text", it.Get("text").String())
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 						case "image_url":
 							// Map image inputs to input_image for Responses API
 							if role == "user" {
-								part := `{}`
-								part, _ = sjson.Set(part, "type", "input_image")
+								part := []byte(`{}`)
+								part, _ = sjson.SetBytes(part, "type", "input_image")
 								if u := it.Get("image_url.url"); u.Exists() {
-									part, _ = sjson.Set(part, "image_url", u.String())
+									part, _ = sjson.SetBytes(part, "image_url", u.String())
 								}
-								msg, _ = sjson.SetRaw(msg, "content.-1", part)
+								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}
 						case "file":
 							if role == "user" {
 								fileData := it.Get("file.file_data").String()
 								filename := it.Get("file.filename").String()
 								if fileData != "" {
-									part := `{}`
-									part, _ = sjson.Set(part, "type", "input_file")
-									part, _ = sjson.Set(part, "file_data", fileData)
+									part := []byte(`{}`)
+									part, _ = sjson.SetBytes(part, "type", "input_file")
+									part, _ = sjson.SetBytes(part, "file_data", fileData)
 									if filename != "" {
-										part, _ = sjson.Set(part, "filename", filename)
+										part, _ = sjson.SetBytes(part, "filename", filename)
 									}
-									msg, _ = sjson.SetRaw(msg, "content.-1", part)
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 								}
 							}
 						}
@@ -201,8 +201,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				// Don't emit empty assistant messages when only tool_calls
 				// are present — Responses API needs function_call items
 				// directly, otherwise call_id matching fails (#2132).
-				if role != "assistant" || len(gjson.Get(msg, "content").Array()) > 0 {
-					out, _ = sjson.SetRaw(out, "input.-1", msg)
+				if role != "assistant" || len(gjson.GetBytes(msg, "content").Array()) > 0 {
+					out, _ = sjson.SetRawBytes(out, "input.-1", msg)
 				}
 
 				// Handle tool calls for assistant messages as separate top-level objects
@@ -214,9 +214,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							tc := toolCallsArr[j]
 							if tc.Get("type").String() == "function" {
 								// Create function_call as top-level object
-								funcCall := `{}`
-								funcCall, _ = sjson.Set(funcCall, "type", "function_call")
-								funcCall, _ = sjson.Set(funcCall, "call_id", tc.Get("id").String())
+								funcCall := []byte(`{}`)
+								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
+								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
 								{
 									name := tc.Get("function.name").String()
 									if short, ok := originalToolNameMap[name]; ok {
@@ -224,10 +224,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 									} else {
 										name = shortenNameIfNeeded(name)
 									}
-									funcCall, _ = sjson.Set(funcCall, "name", name)
+									funcCall, _ = sjson.SetBytes(funcCall, "name", name)
 								}
-								funcCall, _ = sjson.Set(funcCall, "arguments", tc.Get("function.arguments").String())
-								out, _ = sjson.SetRaw(out, "input.-1", funcCall)
+								funcCall, _ = sjson.SetBytes(funcCall, "arguments", tc.Get("function.arguments").String())
+								out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
 							}
 						}
 					}
@@ -241,26 +241,26 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	text := gjson.GetBytes(rawJSON, "text")
 	if rf.Exists() {
 		// Always create text object when response_format provided
-		if !gjson.Get(out, "text").Exists() {
-			out, _ = sjson.SetRaw(out, "text", `{}`)
+		if !gjson.GetBytes(out, "text").Exists() {
+			out, _ = sjson.SetRawBytes(out, "text", []byte(`{}`))
 		}
 
 		rft := rf.Get("type").String()
 		switch rft {
 		case "text":
-			out, _ = sjson.Set(out, "text.format.type", "text")
+			out, _ = sjson.SetBytes(out, "text.format.type", "text")
 		case "json_schema":
 			js := rf.Get("json_schema")
 			if js.Exists() {
-				out, _ = sjson.Set(out, "text.format.type", "json_schema")
+				out, _ = sjson.SetBytes(out, "text.format.type", "json_schema")
 				if v := js.Get("name"); v.Exists() {
-					out, _ = sjson.Set(out, "text.format.name", v.Value())
+					out, _ = sjson.SetBytes(out, "text.format.name", v.Value())
 				}
 				if v := js.Get("strict"); v.Exists() {
-					out, _ = sjson.Set(out, "text.format.strict", v.Value())
+					out, _ = sjson.SetBytes(out, "text.format.strict", v.Value())
 				}
 				if v := js.Get("schema"); v.Exists() {
-					out, _ = sjson.SetRaw(out, "text.format.schema", v.Raw)
+					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(v.Raw))
 				}
 			}
 		}
@@ -268,23 +268,23 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		// Map verbosity if provided
 		if text.Exists() {
 			if v := text.Get("verbosity"); v.Exists() {
-				out, _ = sjson.Set(out, "text.verbosity", v.Value())
+				out, _ = sjson.SetBytes(out, "text.verbosity", v.Value())
 			}
 		}
 	} else if text.Exists() {
 		// If only text.verbosity present (no response_format), map verbosity
 		if v := text.Get("verbosity"); v.Exists() {
-			if !gjson.Get(out, "text").Exists() {
-				out, _ = sjson.SetRaw(out, "text", `{}`)
+			if !gjson.GetBytes(out, "text").Exists() {
+				out, _ = sjson.SetRawBytes(out, "text", []byte(`{}`))
 			}
-			out, _ = sjson.Set(out, "text.verbosity", v.Value())
+			out, _ = sjson.SetBytes(out, "text.verbosity", v.Value())
 		}
 	}
 
 	// Map tools (flatten function fields)
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
-		out, _ = sjson.SetRaw(out, "tools", `[]`)
+		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
 		arr := tools.Array()
 		for i := 0; i < len(arr); i++ {
 			t := arr[i]
@@ -292,7 +292,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
 			// Only "function" needs structural conversion because Chat Completions nests details under "function".
 			if toolType != "" && toolType != "function" && t.IsObject() {
-				out, _ = sjson.SetRaw(out, "tools.-1", t.Raw)
+				out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(t.Raw))
 				continue
 			}
 
@@ -324,7 +324,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				if v := fn.Get("strict"); v.Exists() {
 					item, _ = sjson.Set(item, "strict", v.Value())
 				}
-				out, _ = sjson.SetRaw(out, "tools.-1", item)
+				out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(item))
 			}
 		}
 	}
@@ -335,7 +335,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	if tc := gjson.GetBytes(rawJSON, "tool_choice"); tc.Exists() {
 		switch {
 		case tc.Type == gjson.String:
-			out, _ = sjson.Set(out, "tool_choice", tc.String())
+			out, _ = sjson.SetBytes(out, "tool_choice", tc.String())
 		case tc.IsObject():
 			tcType := strings.TrimSpace(tc.Get("type").String())
 			if tcType == "function" {
@@ -351,16 +351,16 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				choice := `{}`
 				choice, _ = sjson.Set(choice, "type", "function")
 				choice, _ = sjson.Set(choice, "name", name)
-				out, _ = sjson.SetRaw(out, "tool_choice", choice)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(choice))
 			} else if tcType != "" {
 				// Built-in tool choices (e.g. {"type":"web_search"}) are already Responses-compatible.
-				out, _ = sjson.SetRaw(out, "tool_choice", tc.Raw)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(tc.Raw))
 			}
 		}
 	}
 
-	out, _ = sjson.Set(out, "store", false)
-	return []byte(out)
+	out, _ = sjson.SetBytes(out, "store", false)
+	return out
 }
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.
