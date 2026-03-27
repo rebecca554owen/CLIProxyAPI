@@ -14,6 +14,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -162,16 +163,16 @@ func (s *PostgresStore) BootstrapWithFileMigration(ctx context.Context, exampleC
 		return err
 	}
 
-	configEmpty, err := s.configRecordMissing(ctx)
-	if err != nil {
+	if err := s.SetConfigPath(localConfigPath); err != nil {
 		return err
 	}
-	if configEmpty {
-		if imported, errImport := s.importConfigFromFile(ctx, localConfigPath); errImport != nil {
-			return errImport
-		} else if imported {
-			log.Infof("postgres store: imported config from local file %s", localConfigPath)
-		}
+
+	if imported, errImport := s.importConfigFromFile(ctx, s.configPath); errImport != nil {
+		return errImport
+	} else if imported {
+		log.Infof("postgres store: imported config from local file %s", s.configPath)
+	} else if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
+		return err
 	}
 
 	authEmpty, err := s.authTableEmpty(ctx)
@@ -188,9 +189,6 @@ func (s *PostgresStore) BootstrapWithFileMigration(ctx context.Context, exampleC
 		}
 	}
 
-	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
-		return err
-	}
 	if err := s.syncAuthFromDatabase(ctx); err != nil {
 		return err
 	}
@@ -203,6 +201,25 @@ func (s *PostgresStore) ConfigPath() string {
 		return ""
 	}
 	return s.configPath
+}
+
+func (s *PostgresStore) SetConfigPath(path string) error {
+	if s == nil {
+		return fmt.Errorf("postgres store: store not initialized")
+	}
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return nil
+	}
+	absPath, err := filepath.Abs(trimmed)
+	if err != nil {
+		return fmt.Errorf("postgres store: resolve config path: %w", err)
+	}
+	if err = os.MkdirAll(filepath.Dir(absPath), 0o700); err != nil {
+		return fmt.Errorf("postgres store: create config directory: %w", err)
+	}
+	s.configPath = absPath
+	return nil
 }
 
 // AuthDir returns the local directory containing mirrored auth files.
@@ -506,6 +523,9 @@ func (s *PostgresStore) importConfigFromFile(ctx context.Context, localConfigPat
 	trimmed := strings.TrimSpace(localConfigPath)
 	if trimmed == "" {
 		return false, nil
+	}
+	if _, err := config.LoadConfigOptional(trimmed, false); err != nil {
+		return false, fmt.Errorf("postgres store: validate local config for migration: %w", err)
 	}
 	data, err := os.ReadFile(trimmed)
 	if err != nil {

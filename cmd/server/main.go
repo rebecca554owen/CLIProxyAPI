@@ -238,9 +238,15 @@ func main() {
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
+	legacyConfigPath := resolveLegacyConfigPath(wd, configPath)
+	legacyAuthDir := resolveLegacyAuthDir(legacyConfigPath)
 	if usePostgresStore {
-		legacyConfigPath := resolveLegacyConfigPath(wd, configPath)
-		legacyAuthDir := resolveLegacyAuthDir(legacyConfigPath)
+		configFilePath = legacyConfigPath
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		if err != nil {
+			log.Errorf("failed to load config: %v", err)
+			return
+		}
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -260,6 +266,7 @@ func main() {
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 		if errBootstrap := pgStoreInst.BootstrapWithFileMigration(ctx, examplePath, legacyConfigPath, legacyAuthDir); errBootstrap != nil {
 			cancel()
+			_ = pgStoreInst.Close()
 			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
 			return
 		}
@@ -267,11 +274,10 @@ func main() {
 		ctx, cancel = context.WithTimeout(context.Background(), usageMigrationTimeout)
 		if errUsage := usage.MigrateSQLiteToPostgres(ctx, pgStoreDSN, pgStoreSchema, legacyAuthDir); errUsage != nil {
 			cancel()
-			log.Errorf("failed to migrate legacy sqlite usage database: %v", errUsage)
-			return
+			log.Warnf("failed to migrate legacy sqlite usage database, continuing with local runtime storage: %v", errUsage)
+		} else {
+			cancel()
 		}
-		cancel()
-		configFilePath = pgStoreInst.ConfigPath()
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
