@@ -1520,7 +1520,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "openai", "openai")
+	return buildConfigModels(entry.Models, "openai", "codex")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
