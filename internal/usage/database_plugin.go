@@ -148,7 +148,15 @@ func UpdatePersistence(ctx context.Context, enabled bool, authDir string) error 
 	pgStoreDSN := util.GetEnvTrimmed("PGSTORE_DSN", "pgstore_dsn")
 	pgStoreSchema := util.GetEnvTrimmed("PGSTORE_SCHEMA", "pgstore_schema")
 	CloseDatabasePlugin()
-	return InitDatabasePlugin(ctx, pgStoreDSN, pgStoreSchema, authDir)
+	if pgStoreDSN == "" {
+		return InitDatabasePlugin(ctx, "", "", authDir)
+	}
+	if err := InitDatabasePlugin(ctx, pgStoreDSN, pgStoreSchema, authDir); err != nil {
+		log.WithError(err).Warn("usage: postgres unavailable, falling back to local usage storage")
+		CloseDatabasePlugin()
+		return InitDatabasePlugin(ctx, "", "", authDir)
+	}
+	return nil
 }
 
 // UsingSQLiteBackend returns true if the usage persistence would use SQLite (no PGSTORE_DSN set).
