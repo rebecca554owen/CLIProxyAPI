@@ -112,7 +112,7 @@ func TestUpdatePersistenceFallsBackToLocalStoreWhenPostgresUnavailable(t *testin
 	t.Setenv("PGSTORE_SCHEMA", "")
 
 	authDir := filepath.Join(t.TempDir(), "auth")
-	if err := UpdatePersistence(context.Background(), true, authDir); err != nil {
+	if err := UpdatePersistence(context.Background(), true, authDir, 30); err != nil {
 		t.Fatalf("UpdatePersistence() error = %v", err)
 	}
 
@@ -122,5 +122,14 @@ func TestUpdatePersistenceFallsBackToLocalStoreWhenPostgresUnavailable(t *testin
 	}
 	if plugin.storeOnlySnapshot {
 		t.Fatalf("expected local fallback store, got postgres snapshot-only mode")
+	}
+}
+
+func TestNormalizeRetentionDays(t *testing.T) {
+	if got := NormalizeRetentionDays(15); got != 15 {
+		t.Fatalf("NormalizeRetentionDays(15) = %d, want 15", got)
+	}
+	if got := NormalizeRetentionDays(0); got != defaultRetentionDays {
+		t.Fatalf("NormalizeRetentionDays(0) = %d, want %d", got, defaultRetentionDays)
 	}
 }

@@ -167,6 +167,65 @@ func (r *monitorSourceResolver) Resolve(source, authIndex string) monitorSourceR
 	return monitorUnknownSourceRef(sourceKey)
 }
 
+func (r *monitorSourceResolver) FilterKeysForProviderType(providerType string) ([]string, []string) {
+	if r == nil {
+		return nil, nil
+	}
+
+	normalizedType := normalizeMonitorProviderType(providerType)
+	if normalizedType == "" {
+		return nil, nil
+	}
+
+	sourceSet := make(map[string]struct{})
+	authIndexSet := make(map[string]struct{})
+
+	for authIndex, auth := range r.authByIndex {
+		if auth == nil {
+			continue
+		}
+		if normalizeMonitorProviderType(auth.Provider) != normalizedType {
+			continue
+		}
+		trimmed := strings.TrimSpace(authIndex)
+		if trimmed != "" {
+			authIndexSet[trimmed] = struct{}{}
+		}
+	}
+
+	for source, ref := range r.authBySource {
+		if normalizeMonitorProviderType(ref.ProviderType) != normalizedType {
+			continue
+		}
+		trimmed := strings.TrimSpace(source)
+		if trimmed != "" {
+			sourceSet[trimmed] = struct{}{}
+		}
+	}
+
+	for source, ref := range r.providerBySource {
+		if normalizeMonitorProviderType(ref.ProviderType) != normalizedType {
+			continue
+		}
+		trimmed := strings.TrimSpace(source)
+		if trimmed != "" {
+			sourceSet[trimmed] = struct{}{}
+		}
+	}
+
+	sources := make([]string, 0, len(sourceSet))
+	for source := range sourceSet {
+		sources = append(sources, source)
+	}
+
+	authIndices := make([]string, 0, len(authIndexSet))
+	for authIndex := range authIndexSet {
+		authIndices = append(authIndices, authIndex)
+	}
+
+	return sources, authIndices
+}
+
 func buildAuthMonitorSourceRef(auth *coreauth.Auth) monitorSourceRef {
 	if auth == nil {
 		return monitorUnknownSourceRef("")
