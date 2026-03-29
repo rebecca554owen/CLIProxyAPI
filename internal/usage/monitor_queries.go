@@ -25,6 +25,8 @@ type MonitorQueryFilter struct {
 	APIContains string
 	Model       string
 	Source      string
+	Sources     []string
+	AuthIndices []string
 	Status      string
 	Start       *time.Time
 	End         *time.Time
@@ -1967,6 +1969,10 @@ func buildSQLiteMonitorWhere(filter MonitorQueryFilter, includeStatus bool) (str
 			args = append(args, normalized)
 		}
 	}
+	if clause, clauseArgs := buildSQLiteMonitorSourceOrAuthClause(filter.Sources, filter.AuthIndices); clause != "" {
+		clauses = append(clauses, clause)
+		args = append(args, clauseArgs...)
+	}
 	if includeStatus {
 		switch filter.Status {
 		case "success":
@@ -2015,6 +2021,10 @@ func buildPostgresMonitorWhere(filter MonitorQueryFilter, includeStatus bool) (s
 			clauses = append(clauses, "source = "+pgPlaceholder(len(args)))
 		}
 	}
+	if clause, clauseArgs := buildPostgresMonitorSourceOrAuthClause(filter.Sources, filter.AuthIndices, len(args)+1); clause != "" {
+		clauses = append(clauses, clause)
+		args = append(args, clauseArgs...)
+	}
 	if includeStatus {
 		switch filter.Status {
 		case "success":
@@ -2054,7 +2064,110 @@ func normalizeMonitorFilter(filter MonitorQueryFilter) MonitorQueryFilter {
 	if filter.Status != "success" && filter.Status != "failed" {
 		filter.Status = ""
 	}
+	filter.Sources = normalizeMonitorFilterValues(filter.Sources, normalizeMonitorSource)
+	filter.AuthIndices = normalizeMonitorFilterValues(filter.AuthIndices, func(value string) string {
+		return strings.TrimSpace(value)
+	})
 	return filter
+}
+
+func normalizeMonitorFilterValues(values []string, normalize func(string) string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	normalizedValues := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := normalize(value)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		normalizedValues = append(normalizedValues, normalized)
+	}
+
+	if len(normalizedValues) == 0 {
+		return nil
+	}
+
+	return normalizedValues
+}
+
+func buildSQLiteMonitorSourceOrAuthClause(sources, authIndices []string) (string, []any) {
+	parts := make([]string, 0, 2)
+	args := make([]any, 0, len(sources)+len(authIndices))
+
+	if len(sources) > 0 {
+		sourceClauseParts := make([]string, 0, len(sources))
+		for _, source := range sources {
+			if source == "unknown" {
+				sourceClauseParts = append(sourceClauseParts, "(source IS NULL OR source = '')")
+				continue
+			}
+			sourceClauseParts = append(sourceClauseParts, "source = ?")
+			args = append(args, source)
+		}
+		if len(sourceClauseParts) > 0 {
+			parts = append(parts, "("+strings.Join(sourceClauseParts, " OR ")+")")
+		}
+	}
+
+	if len(authIndices) > 0 {
+		authClauseParts := make([]string, 0, len(authIndices))
+		for _, authIndex := range authIndices {
+			authClauseParts = append(authClauseParts, "auth_index = ?")
+			args = append(args, authIndex)
+		}
+		parts = append(parts, "("+strings.Join(authClauseParts, " OR ")+")")
+	}
+
+	if len(parts) == 0 {
+		return "", nil
+	}
+
+	return "(" + strings.Join(parts, " OR ") + ")", args
+}
+
+func buildPostgresMonitorSourceOrAuthClause(sources, authIndices []string, startIndex int) (string, []any) {
+	parts := make([]string, 0, 2)
+	args := make([]any, 0, len(sources)+len(authIndices))
+	placeholderIndex := startIndex
+
+	if len(sources) > 0 {
+		sourceClauseParts := make([]string, 0, len(sources))
+		for _, source := range sources {
+			if source == "unknown" {
+				sourceClauseParts = append(sourceClauseParts, "(source IS NULL OR source = '')")
+				continue
+			}
+			sourceClauseParts = append(sourceClauseParts, "source = "+pgPlaceholder(placeholderIndex))
+			args = append(args, source)
+			placeholderIndex++
+		}
+		if len(sourceClauseParts) > 0 {
+			parts = append(parts, "("+strings.Join(sourceClauseParts, " OR ")+")")
+		}
+	}
+
+	if len(authIndices) > 0 {
+		authClauseParts := make([]string, 0, len(authIndices))
+		for _, authIndex := range authIndices {
+			authClauseParts = append(authClauseParts, "auth_index = "+pgPlaceholder(placeholderIndex))
+			args = append(args, authIndex)
+			placeholderIndex++
+		}
+		parts = append(parts, "("+strings.Join(authClauseParts, " OR ")+")")
+	}
+
+	if len(parts) == 0 {
+		return "", nil
+	}
+
+	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
 func normalizeMonitorSource(source string) string {

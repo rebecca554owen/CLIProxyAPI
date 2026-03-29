@@ -40,6 +40,8 @@ type monitorRecordFilter struct {
 	APIContains string
 	Model       string
 	Source      string
+	Sources     []string
+	AuthIndices []string
 	Status      string
 	Start       *time.Time
 	End         *time.Time
@@ -163,6 +165,8 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		return
 	}
 
+	sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
+
 	dbPlugin := usage.GetDatabasePlugin()
 	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
 		start, end = applyDefaultTimeRange(start, end, 1)
@@ -178,8 +182,26 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		End:         end,
 	}
 
+	providerType := normalizeMonitorProviderType(firstQuery(c, "provider_type", "providerType"))
+	if providerType != "" {
+		filter.Sources, filter.AuthIndices = sourceResolver.FilterKeysForProviderType(providerType)
+		if len(filter.Sources) == 0 && len(filter.AuthIndices) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"items":       []monitorRequestLogItem{},
+				"page":        monitorDefaultPage,
+				"page_size":   pageSize,
+				"total":       0,
+				"total_pages": 0,
+				"has_prev":    false,
+				"has_next":    false,
+				"filters":     monitorFilterOptions{APIs: []string{}, Models: []string{}, Sources: []string{}},
+				"time_range":  monitorTimeRange{Start: start, End: end},
+			})
+			return
+		}
+	}
+
 	if dbPlugin != nil {
-		sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 		queryResult, queryErr := dbPlugin.QueryMonitorRequestLogs(c.Request.Context(), toUsageMonitorFilter(filter), page, pageSize, monitorRecentLimit)
 		if queryErr == nil {
 			items := make([]monitorRequestLogItem, 0, len(queryResult.Items))
@@ -227,7 +249,6 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 	}
 
 	logs := make([]monitorRequestLogItem, 0, 128)
-	sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 	apiSet := make(map[string]struct{})
 	modelSet := make(map[string]struct{})
 	sourceSet := make(map[string]struct{})
@@ -732,6 +753,26 @@ func (f monitorRecordFilter) matches(record monitorRecord) bool {
 	if f.Source != "" && record.Source != f.Source {
 		return false
 	}
+	if len(f.Sources) > 0 || len(f.AuthIndices) > 0 {
+		matched := false
+		for _, source := range f.Sources {
+			if record.Source == source {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			for _, authIndex := range f.AuthIndices {
+				if record.AuthIndex == authIndex {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
 	if f.Status == "success" && record.Failed {
 		return false
 	}
@@ -794,6 +835,8 @@ func toUsageMonitorFilter(filter monitorRecordFilter) usage.MonitorQueryFilter {
 		APIContains: strings.TrimSpace(filter.APIContains),
 		Model:       strings.TrimSpace(filter.Model),
 		Source:      strings.TrimSpace(filter.Source),
+		Sources:     append([]string(nil), filter.Sources...),
+		AuthIndices: append([]string(nil), filter.AuthIndices...),
 		Status:      strings.TrimSpace(filter.Status),
 		Start:       filter.Start,
 		End:         filter.End,

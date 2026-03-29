@@ -70,6 +70,9 @@ type Config struct {
 	// is set, otherwise SQLite in auth directory.
 	UsagePersistenceEnabled bool `yaml:"usage-persistence-enabled" json:"usage-persistence-enabled"`
 
+	// UsageRetentionDays controls how many days of persisted usage records are retained.
+	UsageRetentionDays int `yaml:"usage-retention-days" json:"usage-retention-days"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -570,6 +573,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageRetentionDays = 30
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -621,6 +625,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.UsageRetentionDays <= 0 {
+		cfg.UsageRetentionDays = 30
 	}
 
 	if cfg.MaxRetryCredentials < 0 {
@@ -1304,6 +1312,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "usage-retention-days":
+			return node.Value == "30"
 		}
 	}
 
