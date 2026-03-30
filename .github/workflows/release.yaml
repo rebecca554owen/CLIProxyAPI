@@ -207,6 +207,7 @@ jobs:
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
+          allowUpdates: true
           tag: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}
           draft: false
