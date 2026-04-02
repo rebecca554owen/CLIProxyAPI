@@ -83,8 +83,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
 	}
-	if got := headers.Get("User-Agent"); got != codexUserAgent {
-		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
@@ -142,8 +142,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
 
-	if got := headers.Get("User-Agent"); got != "my-codex-client/1.0" {
-		t.Fatalf("User-Agent = %s, want %s", got, "my-codex-client/1.0")
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "feature-a,feature-b" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "feature-a,feature-b")
@@ -174,8 +174,8 @@ func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	if gotVal := got.Get("User-Agent"); gotVal != "existing-ua" {
-		t.Fatalf("User-Agent = %s, want %s", gotVal, "existing-ua")
+	if gotVal := got.Get("User-Agent"); gotVal != "" {
+		t.Fatalf("User-Agent = %s, want empty", gotVal)
 	}
 	if gotVal := got.Get("x-codex-beta-features"); gotVal != "existing-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", gotVal, "existing-beta")
@@ -200,8 +200,8 @@ func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testi
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
 
-	if got := headers.Get("User-Agent"); got != "config-ua" {
-		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "client-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "client-beta")
@@ -222,8 +222,8 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
 
-	if got := headers.Get("User-Agent"); got != codexUserAgent {
-		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
