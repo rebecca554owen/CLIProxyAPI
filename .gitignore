@@ -54,3 +54,9 @@ usage.*
 /.gomodcache
 /.gotmp
 /.gopath
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/

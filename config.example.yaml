@@ -73,6 +73,10 @@ usage-retention-days: 30
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# When true, disable remote models.json refresh and use only the embedded model catalog.
+# Command-line -local-model takes precedence over this config value.
+local-model: false
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
@@ -102,6 +106,10 @@ routing:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
+
+# When true, enable Gemini CLI internal endpoints (/v1internal:*).
+# Default is false for safety.
+enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
