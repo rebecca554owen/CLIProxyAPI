@@ -53,8 +53,8 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				continue
 			}
 			for _, fn := range fns.Array() {
-				if v := fn.Get("name"); v.Exists() {
-					names = append(names, v.String())
+				if name, ok := util.NormalizeRequestToolName(fn.Get("name").String(), nil); ok {
+					names = append(names, name)
 				}
 			}
 		}
@@ -140,15 +140,16 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				// function call from model
 				if fc := p.Get("functionCall"); fc.Exists() {
 					fn := []byte(`{"type":"function_call"}`)
-					if name := fc.Get("name"); name.Exists() {
-						n := name.String()
-						if short, ok := shortMap[n]; ok {
-							n = short
-						} else {
-							n = shortenNameIfNeeded(n)
-						}
-						fn, _ = sjson.SetBytes(fn, "name", n)
+					name, ok := util.NormalizeRequestToolName(fc.Get("name").String(), nil)
+					if !ok {
+						continue
 					}
+					if short, ok := shortMap[name]; ok {
+						name = short
+					} else {
+						name = shortenNameIfNeeded(name)
+					}
+					fn, _ = sjson.SetBytes(fn, "name", name)
 					if args := fc.Get("args"); args.Exists() {
 						fn, _ = sjson.SetBytes(fn, "arguments", args.Raw)
 					}
@@ -205,32 +206,35 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			farr := fns.Array()
 			for j := 0; j < len(farr); j++ {
 				fn := farr[j]
+				name, ok := util.NormalizeRequestToolName(fn.Get("name").String(), nil)
+				if !ok {
+					continue
+				}
 				tool := []byte(`{}`)
 				tool, _ = sjson.SetBytes(tool, "type", "function")
-				if v := fn.Get("name"); v.Exists() {
-					name := v.String()
-					if short, ok := shortMap[name]; ok {
-						name = short
-					} else {
-						name = shortenNameIfNeeded(name)
-					}
-					tool, _ = sjson.SetBytes(tool, "name", name)
+				if short, ok := shortMap[name]; ok {
+					name = short
+				} else {
+					name = shortenNameIfNeeded(name)
 				}
+				tool, _ = sjson.SetBytes(tool, "name", name)
 				if v := fn.Get("description"); v.Exists() {
 					tool, _ = sjson.SetBytes(tool, "description", v.String())
 				}
 				if prm := fn.Get("parameters"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
+					cleaned := util.CleanJSONSchemaForStrictUpstream(prm.Raw)
+					cleanedBytes := []byte(cleaned)
+					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
 				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
+					cleaned := util.CleanJSONSchemaForStrictUpstream(prm.Raw)
+					cleanedBytes := []byte(cleaned)
+					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
+				} else {
+					cleanedBytes := []byte(util.CleanJSONSchemaForStrictUpstream(""))
+					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
 				}
 				tool, _ = sjson.SetBytes(tool, "strict", false)
 				out, _ = sjson.SetRawBytes(out, "tools.-1", tool)

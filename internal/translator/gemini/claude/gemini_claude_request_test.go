@@ -78,3 +78,45 @@ func TestConvertClaudeRequestToGemini_ImageContent(t *testing.T) {
 		t.Fatalf("Expected image data 'aGVsbG8=', got '%s'", got)
 	}
 }
+
+func TestConvertClaudeRequestToGemini_NormalizesPollutedInteropTranscript(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [{"type": "input_text", "text": "pre"}],
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "sessions_list", "arguments": "{\"limit\":10}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "ok"
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+	contents := gjson.GetBytes(output, "contents").Array()
+
+	if len(contents) != 2 {
+		t.Fatalf("Expected 2 contents, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "model" {
+		t.Fatalf("Expected first role model, got %q", got)
+	}
+	if got := contents[0].Get("parts.0.text").String(); got != "pre" {
+		t.Fatalf("Expected first part text %q, got %q", "pre", got)
+	}
+	if got := contents[0].Get("parts.1.functionCall.name").String(); got != "sessions_list" {
+		t.Fatalf("Expected functionCall name %q, got %q", "sessions_list", got)
+	}
+	if got := contents[1].Get("role").String(); got != "user" {
+		t.Fatalf("Expected second role user, got %q", got)
+	}
+	if got := contents[1].Get("parts.0.functionResponse.name").String(); got != "call_1" {
+		t.Fatalf("Expected functionResponse name %q, got %q", "call_1", got)
+	}
+}

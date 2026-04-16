@@ -264,6 +264,161 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesAssistantReasoningContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "hello"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"reasoning_content": "first think",
+				"content": [{"type": "output_text", "text": "hi"}]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "input.1.type").String(); got != "reasoning" {
+		t.Fatalf("input.1.type = %q, want reasoning: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.1.summary.0.type").String(); got != "summary_text" {
+		t.Fatalf("input.1.summary.0.type = %q, want summary_text: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.1.summary.0.text").String(); got != "first think" {
+		t.Fatalf("input.1.summary.0.text = %q, want %q: %s", got, "first think", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.2.role").String(); got != "assistant" {
+		t.Fatalf("input.2.role = %q, want assistant: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.2.content.0.text").String(); got != "hi" {
+		t.Fatalf("input.2.content.0.text = %q, want %q: %s", got, "hi", string(output))
+	}
+	if gjson.GetBytes(output, "input.2.reasoning_content").Exists() {
+		t.Fatalf("assistant reasoning_content should be removed: %s", string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_StripsNonAssistantReasoningContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "developer",
+				"reasoning_content": "dev think",
+				"content": [{"type": "input_text", "text": "rules"}]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"reasoning_content": "user think",
+				"content": [{"type": "input_text", "text": "question"}]
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_123",
+				"reasoning_content": "tool think",
+				"output": "done"
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	if got := len(gjson.GetBytes(output, "input").Array()); got != 3 {
+		t.Fatalf("input length = %d, want 3: %s", got, string(output))
+	}
+	if gjson.GetBytes(output, "input.0.reasoning_content").Exists() {
+		t.Fatalf("developer reasoning_content should be removed: %s", string(output))
+	}
+	if gjson.GetBytes(output, "input.1.reasoning_content").Exists() {
+		t.Fatalf("user reasoning_content should be removed: %s", string(output))
+	}
+	if gjson.GetBytes(output, "input.2.reasoning_content").Exists() {
+		t.Fatalf("tool reasoning_content should be removed: %s", string(output))
+	}
+	if gjson.GetBytes(output, "input.0.type").String() == "reasoning" || gjson.GetBytes(output, "input.1.type").String() == "reasoning" || gjson.GetBytes(output, "input.2.type").String() == "reasoning" {
+		t.Fatalf("non-assistant items must not become reasoning items: %s", string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesMultipleAssistantReasoningItems(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "assistant",
+				"reasoning_content": "first think",
+				"content": [{"type": "output_text", "text": "first answer"}]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "follow up"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"reasoning_content": "second think",
+				"content": [{"type": "output_text", "text": "second answer"}]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	if got := len(gjson.GetBytes(output, "input").Array()); got != 5 {
+		t.Fatalf("input length = %d, want 5: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.0.type").String(); got != "reasoning" {
+		t.Fatalf("input.0.type = %q, want reasoning: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.1.content.0.text").String(); got != "first answer" {
+		t.Fatalf("input.1.content.0.text = %q, want %q: %s", got, "first answer", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.3.type").String(); got != "reasoning" {
+		t.Fatalf("input.3.type = %q, want reasoning: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.4.content.0.text").String(); got != "second answer" {
+		t.Fatalf("input.4.content.0.text = %q, want %q: %s", got, "second answer", string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_ReasoningContentRegression(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "assistant",
+				"reasoning_content": "first think",
+				"content": [{"type": "output_text", "text": "first answer"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"reasoning_content": "second think",
+				"content": [{"type": "output_text", "text": "second answer"}]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	for i, item := range gjson.GetBytes(output, "input").Array() {
+		if item.Get("reasoning_content").Exists() {
+			t.Fatalf("input.%d.reasoning_content should not exist: %s", i, string(output))
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToCodex_NormalizesWebSearchPreview(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.4-mini",

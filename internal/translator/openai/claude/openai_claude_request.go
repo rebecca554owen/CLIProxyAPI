@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -17,7 +18,7 @@ import (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
 func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeClaudeRequestJSON(inputRawJSON)
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
 
@@ -135,9 +136,14 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {
 				contentItems := make([][]byte, 0)
-				var reasoningParts []string // Accumulate thinking text for reasoning_content
+				var reasoningParts []string
+				if role == "assistant" {
+					if reasoning := strings.TrimSpace(message.Get("reasoning_content").String()); reasoning != "" {
+						reasoningParts = append(reasoningParts, reasoning)
+					}
+				}
 				var toolCalls []interface{}
-				toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
+				toolResults := make([][]byte, 0)
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {
 					partType := part.Get("type").String()
@@ -284,12 +290,19 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			openAIToolJSON := []byte(`{"type":"function","function":{"name":"","description":""}}`)
-			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.name", tool.Get("name").String())
+			name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+			if !ok {
+				return true
+			}
+			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.name", name)
 			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.description", tool.Get("description").String())
 
 			// Convert Anthropic input_schema to OpenAI function parameters
 			if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
-				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", inputSchema.Value())
+				cleaned := util.CleanJSONSchemaForStrictUpstream(inputSchema.Raw)
+				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(cleaned))
+			} else {
+				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 			}
 
 			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", openAIToolJSON)
@@ -310,7 +323,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			out, _ = sjson.SetBytes(out, "tool_choice", "required")
 		case "tool":
 			// Specific tool choice
-			toolName := toolChoice.Get("name").String()
+			toolName, ok := util.NormalizeRequestToolName(toolChoice.Get("name").String(), nil)
+			if !ok {
+				break
+			}
 			toolChoiceJSON := []byte(`{"type":"function","function":{"name":""}}`)
 			toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "function.name", toolName)
 			out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
