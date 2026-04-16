@@ -2,6 +2,7 @@ package responses
 
 import (
 	"fmt"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -38,6 +39,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
 
+	rawJSON = normalizeInputReasoningItems(rawJSON)
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
@@ -60,6 +62,48 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
 	return rawJSON
+}
+
+func normalizeInputReasoningItems(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	normalized := make([]any, 0, len(inputArray))
+
+	for _, item := range inputArray {
+		itemValue := item.Value()
+		itemMap, ok := itemValue.(map[string]any)
+		if !ok {
+			normalized = append(normalized, itemValue)
+			continue
+		}
+
+		reasoningContent := strings.TrimSpace(item.Get("reasoning_content").String())
+		if reasoningContent != "" && item.Get("type").String() == "message" && item.Get("role").String() == "assistant" {
+			normalized = append(normalized, map[string]any{
+				"type": "reasoning",
+				"summary": []any{
+					map[string]any{
+						"type": "summary_text",
+						"text": reasoningContent,
+					},
+				},
+			})
+		}
+
+		delete(itemMap, "reasoning_content")
+		normalized = append(normalized, itemMap)
+	}
+
+	updated, err := sjson.SetBytes(rawJSON, "input", normalized)
+	if err != nil {
+		return rawJSON
+	}
+
+	return updated
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items

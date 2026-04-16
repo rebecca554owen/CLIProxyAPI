@@ -696,3 +696,48 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_NormalizesPollutedInteropTranscript(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "input_text", "text": "pre"},
+					{"type": "thinking", "thinking": "internal"}
+				],
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "sessions_list", "arguments": "{\"limit\":10}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "ok"
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), gjson.GetBytes(result, "messages").Raw)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "pre" {
+		t.Fatalf("Expected assistant text %q, got %q", "pre", got)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "internal" {
+		t.Fatalf("Expected reasoning_content %q, got %q", "internal", got)
+	}
+	if got := messages[0].Get("tool_calls.0.function.name").String(); got != "sessions_list" {
+		t.Fatalf("Expected tool call name %q, got %q", "sessions_list", got)
+	}
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("Expected second message role tool, got %q", got)
+	}
+	if got := messages[1].Get("content").String(); got != "ok" {
+		t.Fatalf("Expected tool output %q, got %q", "ok", got)
+	}
+}
