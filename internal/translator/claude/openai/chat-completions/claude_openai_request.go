@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -44,7 +45,7 @@ var (
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeOpenAIChatRequestJSON(inputRawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -188,6 +189,13 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "user", "assistant":
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
+				if role == "assistant" {
+					if reasoning := strings.TrimSpace(message.Get("reasoning_content").String()); reasoning != "" {
+						thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
+						thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", reasoning)
+						msg, _ = sjson.SetRawBytes(msg, "content.-1", thinkingPart)
+					}
+				}
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
@@ -280,15 +288,23 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
+				name, ok := util.NormalizeRequestToolName(function.Get("name").String(), nil)
+				if !ok {
+					return true
+				}
 				anthropicTool := []byte(`{"name":"","description":""}`)
-				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
 				if parameters := function.Get("parameters"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+					cleaned := util.CleanJSONSchemaForStrictUpstream(parameters.Raw)
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(cleaned))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+					cleaned := util.CleanJSONSchemaForStrictUpstream(parameters.Raw)
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(cleaned))
+				} else {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 				}
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
@@ -318,7 +334,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		case gjson.JSON:
 			// Specific tool choice mapping
 			if toolChoice.Get("type").String() == "function" {
-				functionName := toolChoice.Get("function.name").String()
+				functionName, ok := util.NormalizeRequestToolName(toolChoice.Get("function.name").String(), nil)
+				if !ok {
+					break
+				}
 				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
