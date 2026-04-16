@@ -18,7 +18,7 @@ import (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
 func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeClaudeRequestJSON(inputRawJSON)
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
 
@@ -136,9 +136,14 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {
 				contentItems := make([][]byte, 0)
-				var reasoningParts []string // Accumulate thinking text for reasoning_content
+				var reasoningParts []string
+				if role == "assistant" {
+					if reasoning := strings.TrimSpace(message.Get("reasoning_content").String()); reasoning != "" {
+						reasoningParts = append(reasoningParts, reasoning)
+					}
+				}
 				var toolCalls []interface{}
-				toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
+				toolResults := make([][]byte, 0)
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {
 					partType := part.Get("type").String()

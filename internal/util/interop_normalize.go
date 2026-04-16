@@ -50,6 +50,41 @@ func NormalizeOpenAIChatRequestJSON(input []byte) []byte {
 	return out
 }
 
+func NormalizeClaudeRequestJSON(input []byte) []byte {
+	if len(input) == 0 || !gjson.ValidBytes(input) {
+		return input
+	}
+
+	out := input
+	root := gjson.ParseBytes(out)
+
+	if system := root.Get("system"); system.Exists() {
+		normalizedSystem := normalizeClaudeSystem(system)
+		if normalizedSystem != "" && normalizedSystem != system.Raw {
+			next, err := sjson.SetRawBytes(out, "system", []byte(normalizedSystem))
+			if err == nil {
+				out = next
+				root = gjson.ParseBytes(out)
+			}
+		}
+	}
+
+	messages := root.Get("messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return out
+	}
+
+	normalizedMessages := normalizeClaudeMessagesArray(messages.Array())
+	if normalizedMessages == "" || normalizedMessages == messages.Raw {
+		return out
+	}
+	next, err := sjson.SetRawBytes(out, "messages", []byte(normalizedMessages))
+	if err != nil {
+		return out
+	}
+	return next
+}
+
 func normalizeResponsesInputArray(items []gjson.Result) string {
 	out := []byte(`[]`)
 	changed := false
@@ -208,6 +243,221 @@ func normalizeChatMessagesArray(messages []gjson.Result) string {
 		return ""
 	}
 	return string(out)
+}
+
+func normalizeClaudeSystem(system gjson.Result) string {
+	switch {
+	case system.Type == gjson.String:
+		text := system.String()
+		if strings.TrimSpace(text) == "" {
+			return ""
+		}
+		block := []byte(`[]`)
+		textPart := []byte(`{"type":"text","text":""}`)
+		textPart, _ = sjson.SetBytes(textPart, "text", text)
+		block, _ = sjson.SetRawBytes(block, "-1", textPart)
+		return string(block)
+	case system.IsArray():
+		out := []byte(`[]`)
+		changed := false
+		for _, part := range system.Array() {
+			normalized, partChanged := normalizeClaudeContentPart(part)
+			if normalized == "" {
+				changed = true
+				continue
+			}
+			out, _ = sjson.SetRawBytes(out, "-1", []byte(normalized))
+			if partChanged {
+				changed = true
+			}
+		}
+		if !changed {
+			return ""
+		}
+		return string(out)
+	default:
+		return ""
+	}
+}
+
+func normalizeClaudeMessagesArray(messages []gjson.Result) string {
+	out := []byte(`[]`)
+	changed := false
+
+	for _, message := range messages {
+		items, itemChanged := normalizeClaudeMessage(message)
+		for _, item := range items {
+			out, _ = sjson.SetRawBytes(out, "-1", []byte(item))
+		}
+		if itemChanged {
+			changed = true
+		}
+	}
+
+	if !changed {
+		return ""
+	}
+	return string(out)
+}
+
+func normalizeClaudeMessage(message gjson.Result) ([]string, bool) {
+	role := strings.TrimSpace(message.Get("role").String())
+	msg := []byte(message.Raw)
+	changed := false
+
+	if role == "tool" {
+		toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+		toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", message.Get("tool_call_id").String())
+		if content := message.Get("content"); content.Exists() {
+			if content.Type == gjson.String {
+				toolResult, _ = sjson.SetBytes(toolResult, "content", content.String())
+			} else {
+				toolResult, _ = sjson.SetRawBytes(toolResult, "content", []byte(content.Raw))
+			}
+		}
+		userMessage := []byte(`{"role":"user","content":[]}`)
+		userMessage, _ = sjson.SetRawBytes(userMessage, "content.-1", toolResult)
+		return []string{string(userMessage)}, true
+	}
+
+	content := message.Get("content")
+	normalizedContent := []byte(`[]`)
+	contentChanged := false
+	reasoning := strings.TrimSpace(message.Get("reasoning_content").String())
+	contentExists := false
+
+	if content.Type == gjson.String {
+		if text := content.String(); strings.TrimSpace(text) != "" {
+			part := []byte(`{"type":"text","text":""}`)
+			part, _ = sjson.SetBytes(part, "text", text)
+			normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", part)
+			contentExists = true
+			contentChanged = true
+		}
+	} else if content.IsArray() {
+		for _, part := range content.Array() {
+			partType := strings.TrimSpace(part.Get("type").String())
+			switch partType {
+			case "thinking":
+				if role == "assistant" {
+					text := strings.TrimSpace(part.Get("thinking").String())
+					if text != "" {
+						if reasoning == "" {
+							reasoning = text
+						} else {
+							reasoning += "\n\n" + text
+						}
+					}
+				}
+				contentChanged = true
+			case "redacted_thinking":
+				contentChanged = true
+			default:
+				normalized, partChanged := normalizeClaudeContentPart(part)
+				if normalized == "" {
+					if partChanged {
+						contentChanged = true
+					}
+					continue
+				}
+				normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", []byte(normalized))
+				contentExists = true
+				if partChanged {
+					contentChanged = true
+				}
+			}
+		}
+	}
+
+	if calls := message.Get("tool_calls"); calls.Exists() && calls.IsArray() {
+		for _, call := range calls.Array() {
+			if call.Get("type").String() != "function" {
+				continue
+			}
+			part := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+			part, _ = sjson.SetBytes(part, "id", call.Get("id").String())
+			part, _ = sjson.SetBytes(part, "name", call.Get("function.name").String())
+			args := strings.TrimSpace(call.Get("function.arguments").String())
+			if args != "" && gjson.Valid(args) && gjson.Parse(args).IsObject() {
+				part, _ = sjson.SetRawBytes(part, "input", []byte(args))
+			}
+			normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", part)
+			contentExists = true
+			contentChanged = true
+		}
+	}
+
+	if !contentChanged && strings.TrimSpace(message.Get("reasoning_content").String()) == reasoning {
+		return []string{message.Raw}, false
+	}
+
+	if contentExists {
+		msg, _ = sjson.SetRawBytes(msg, "content", normalizedContent)
+	} else {
+		msg, _ = sjson.SetRawBytes(msg, "content", []byte(`[]`))
+	}
+	if reasoning != "" {
+		msg, _ = sjson.SetBytes(msg, "reasoning_content", reasoning)
+	} else {
+		msg, _ = sjson.DeleteBytes(msg, "reasoning_content")
+	}
+
+	changed = contentChanged || reasoning != strings.TrimSpace(message.Get("reasoning_content").String())
+	return []string{string(msg)}, changed
+}
+
+func normalizeClaudeContentPart(part gjson.Result) (string, bool) {
+	partType := strings.TrimSpace(part.Get("type").String())
+	switch partType {
+	case "text", "image", "tool_use", "tool_result":
+		return part.Raw, false
+	case "input_text", "output_text":
+		item := []byte(`{"type":"text","text":""}`)
+		item, _ = sjson.SetBytes(item, "text", part.Get("text").String())
+		return string(item), true
+	case "image_url":
+		url := strings.TrimSpace(part.Get("image_url.url").String())
+		if url == "" {
+			url = strings.TrimSpace(part.Get("image_url").String())
+		}
+		if url == "" {
+			return "", true
+		}
+		item := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		item, _ = sjson.SetBytes(item, "source.url", url)
+		return string(item), true
+	case "input_image":
+		url := strings.TrimSpace(part.Get("image_url").String())
+		if url == "" {
+			return "", true
+		}
+		item := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		item, _ = sjson.SetBytes(item, "source.url", url)
+		return string(item), true
+	case "function_call":
+		item := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+		item, _ = sjson.SetBytes(item, "id", part.Get("call_id").String())
+		item, _ = sjson.SetBytes(item, "name", part.Get("name").String())
+		args := strings.TrimSpace(part.Get("arguments").String())
+		if args != "" && gjson.Valid(args) && gjson.Parse(args).IsObject() {
+			item, _ = sjson.SetRawBytes(item, "input", []byte(args))
+		}
+		return string(item), true
+	case "function_call_output":
+		item := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+		item, _ = sjson.SetBytes(item, "tool_use_id", part.Get("call_id").String())
+		output := part.Get("output")
+		if output.Exists() {
+			if output.Type == gjson.String {
+				item, _ = sjson.SetBytes(item, "content", output.String())
+			} else {
+				item, _ = sjson.SetRawBytes(item, "content", []byte(output.Raw))
+			}
+		}
+		return string(item), true
+	default:
+		return part.Raw, false
+	}
 }
 
 func normalizeChatMessage(message gjson.Result) (string, []string) {

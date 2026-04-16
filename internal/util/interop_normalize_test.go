@@ -73,3 +73,47 @@ func TestNormalizeOpenAIChatRequestJSON_ConvertsClaudeBlocks(t *testing.T) {
 		t.Fatalf("expected appended tool role, got %q: %s", got, msgs[2].Raw)
 	}
 }
+
+func TestNormalizeClaudeRequestJSON_ConvertsPollutedInteropMessages(t *testing.T) {
+	input := []byte(`{
+		"system":"Be precise",
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[
+					{"type":"input_text","text":"draft"},
+					{"type":"thinking","thinking":"internal"}
+				],
+				"tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"sessions_list","arguments":"{\"limit\":10}"}}
+				]
+			},
+			{
+				"role":"tool",
+				"tool_call_id":"call_1",
+				"content":"ok"
+			}
+		]
+	}`)
+
+	out := NormalizeClaudeRequestJSON(input)
+
+	if got := gjson.GetBytes(out, "system.0.type").String(); got != "text" {
+		t.Fatalf("expected normalized system text block, got %s", gjson.GetBytes(out, "system").Raw)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "text" {
+		t.Fatalf("expected assistant content[0] text, got %s", gjson.GetBytes(out, "messages.0.content").Raw)
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "internal" {
+		t.Fatalf("expected reasoning_content=internal, got %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.type").String(); got != "tool_use" {
+		t.Fatalf("expected synthesized tool_use, got %s", gjson.GetBytes(out, "messages.0.content").Raw)
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "user" {
+		t.Fatalf("expected tool role to normalize into user role, got %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("expected normalized tool_result, got %s", gjson.GetBytes(out, "messages.1.content").Raw)
+	}
+}

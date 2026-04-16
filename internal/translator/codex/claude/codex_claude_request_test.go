@@ -133,3 +133,51 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertClaudeRequestToCodex_NormalizesPollutedInteropTranscript(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "input_text", "text": "pre"},
+					{"type": "thinking", "thinking": "internal"}
+				],
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "sessions_list", "arguments": "{\"limit\":10}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "ok"
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	items := gjson.GetBytes(result, "input").Array()
+
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %s", len(items), gjson.GetBytes(result, "input").Raw)
+	}
+	if got := items[0].Get("type").String(); got != "message" {
+		t.Fatalf("expected first item message, got %q", got)
+	}
+	if got := items[0].Get("content.0.type").String(); got != "output_text" {
+		t.Fatalf("expected first message content type %q, got %q", "output_text", got)
+	}
+	if got := items[0].Get("reasoning_content").String(); got != "internal" {
+		t.Fatalf("expected reasoning_content %q, got %q", "internal", got)
+	}
+	if got := items[1].Get("type").String(); got != "function_call" {
+		t.Fatalf("expected second item function_call, got %q", got)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected third item function_call_output, got %q", got)
+	}
+	if got := items[2].Get("output").String(); got != "ok" {
+		t.Fatalf("expected tool output %q, got %q", "ok", got)
+	}
+}

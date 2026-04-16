@@ -35,7 +35,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in internal client format
 func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeClaudeRequestJSON(inputRawJSON)
 
 	template := []byte(`{"model":"","instructions":"","input":[]}`)
 
@@ -93,13 +93,18 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			message := newMessage()
 			contentIndex := 0
 			hasContent := false
+			reasoningContent := strings.TrimSpace(messageResult.Get("reasoning_content").String())
 
 			flushMessage := func() {
-				if hasContent {
+				if hasContent || reasoningContent != "" {
+					if reasoningContent != "" {
+						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+					}
 					template, _ = sjson.SetRawBytes(template, "input.-1", message)
 					message = newMessage()
 					contentIndex = 0
 					hasContent = false
+					reasoningContent = ""
 				}
 			}
 
