@@ -70,6 +70,9 @@ type Config struct {
 	// is set, otherwise SQLite in auth directory.
 	UsagePersistenceEnabled bool `yaml:"usage-persistence-enabled" json:"usage-persistence-enabled"`
 
+	// UsageRetentionDays controls how many days of persisted usage records are retained.
+	UsageRetentionDays int `yaml:"usage-retention-days" json:"usage-retention-days"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -544,6 +547,9 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Disabled indicates whether this API key is disabled.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
@@ -606,6 +612,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageRetentionDays = 30
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -657,6 +664,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.UsageRetentionDays <= 0 {
+		cfg.UsageRetentionDays = 30
 	}
 
 	if cfg.MaxRetryCredentials < 0 {
@@ -793,7 +804,7 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
-// allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
+// and preserves distinct (name, alias) mappings within each channel.
 func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return
@@ -804,7 +815,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		if channel == "" || len(aliases) == 0 {
 			continue
 		}
-		seenAlias := make(map[string]struct{}, len(aliases))
+		seenPair := make(map[string]struct{}, len(aliases))
 		clean := make([]OAuthModelAlias, 0, len(aliases))
 		for _, entry := range aliases {
 			name := strings.TrimSpace(entry.Name)
@@ -815,11 +826,11 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(alias)
-			if _, ok := seenAlias[aliasKey]; ok {
+			pairKey := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
+			if _, ok := seenPair[pairKey]; ok {
 				continue
 			}
-			seenAlias[aliasKey] = struct{}{}
+			seenPair[pairKey] = struct{}{}
 			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
 		}
 		if len(clean) > 0 {
@@ -1342,6 +1353,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "usage-retention-days":
+			return node.Value == "30"
 		}
 	}
 
