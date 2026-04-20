@@ -263,6 +263,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	managementasset.SetCurrentConfig(cfg)
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	auth.SetDeleteUnauthorizedAuth(cfg.DeleteUnauthorizedAuth)
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
@@ -920,6 +921,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	}
+
+	if oldCfg == nil || oldCfg.DeleteUnauthorizedAuth != cfg.DeleteUnauthorizedAuth {
+		auth.SetDeleteUnauthorizedAuth(cfg.DeleteUnauthorizedAuth)
 	}
 
 	applySignatureCacheConfig(oldCfg, cfg)
