@@ -64,8 +64,13 @@ const (
 	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
+	// success but the auth still evaluates as needing refresh (e.g. token expiry
+	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
+	// burn CPU at idle.
+	refreshIneffectiveBackoff = 30 * time.Second
+	quotaBackoffBase          = time.Second
+	quotaBackoffMax           = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -73,6 +78,16 @@ var quotaCooldownDisabled atomic.Bool
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
+}
+
+var deleteUnauthorizedAuthEnabled atomic.Bool
+
+// SetDeleteUnauthorizedAuth toggles whether a 401 response should evict the auth
+// from memory and delete it from the underlying store. When false (default), a
+// 401 only marks the auth as unauthorized and cools it down (see MarkResult),
+// but the auth record is preserved.
+func SetDeleteUnauthorizedAuth(enable bool) {
+	deleteUnauthorizedAuthEnabled.Store(enable)
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
@@ -2791,6 +2806,14 @@ func (m *Manager) evictUnauthorizedAuth(ctx context.Context, auth *Auth, provide
 	model = strings.TrimSpace(model)
 
 	entry := logEntryWithRequestID(ctx)
+	if !deleteUnauthorizedAuthEnabled.Load() {
+		if model != "" {
+			entry.Infof("skip evicting unauthorized auth provider=%s auth=%s model=%s (delete-unauthorized-auth=false)", provider, auth.ID, model)
+		} else {
+			entry.Infof("skip evicting unauthorized auth provider=%s auth=%s (delete-unauthorized-auth=false)", provider, auth.ID)
+		}
+		return nil
+	}
 	if model != "" {
 		entry.Infof("evicting unauthorized auth provider=%s auth=%s model=%s due to 401", provider, auth.ID, model)
 	} else {
@@ -3554,6 +3577,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
+	if m.shouldRefresh(updated, now) {
+		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
+	}
 	_, _ = m.Update(ctx, updated)
 }
 

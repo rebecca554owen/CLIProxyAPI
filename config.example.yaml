@@ -97,6 +97,11 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# When true, credentials returning 401 are evicted from memory and deleted from the store.
+# When false (default), 401 only marks the credential as unauthorized and cools it down
+# (30 minutes by default) but keeps the record intact so it can be repaired/reused later.
+delete-unauthorized-auth: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
