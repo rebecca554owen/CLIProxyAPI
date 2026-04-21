@@ -230,6 +230,12 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "fill-first", "sequential-fill" ("sf").
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// GroupStrategies overrides the global strategy for a specific routing group.
+	// Keys are matched against auth routing groups, which may come from explicit
+	// credential-level "routing-group" fields or built-in fallbacks such as
+	// OpenAI-compat provider names and credential prefixes.
+	GroupStrategies map[string]string `yaml:"group-strategies,omitempty" json:"group-strategies,omitempty"`
+
 	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.
 	// When enabled, requests with the same session ID (extracted from metadata.user_id)
 	// are routed to the same auth credential when available.
@@ -389,6 +395,10 @@ type ClaudeKey struct {
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// RoutingGroup assigns this credential to a logical routing pool so
+	// routing.group-strategies can override its selection behavior independently.
+	RoutingGroup string `yaml:"routing-group,omitempty" json:"routing-group,omitempty"`
+
 	// BaseURL is the base URL for the Claude API endpoint.
 	// If empty, the default Claude API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
@@ -445,6 +455,10 @@ type CodexKey struct {
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// RoutingGroup assigns this credential to a logical routing pool so
+	// routing.group-strategies can override its selection behavior independently.
+	RoutingGroup string `yaml:"routing-group,omitempty" json:"routing-group,omitempty"`
+
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
@@ -495,6 +509,10 @@ type GeminiKey struct {
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// RoutingGroup assigns this credential to a logical routing pool so
+	// routing.group-strategies can override its selection behavior independently.
+	RoutingGroup string `yaml:"routing-group,omitempty" json:"routing-group,omitempty"`
 
 	// BaseURL optionally overrides the Gemini API endpoint.
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
@@ -547,6 +565,10 @@ type OpenAICompatibility struct {
 	// Prefix optionally namespaces model aliases for this provider (e.g., "teamA/kimi-k2").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// RoutingGroup assigns this provider (and its APIKeyEntries by default) to a
+	// logical routing pool so routing.group-strategies can override its behavior.
+	RoutingGroup string `yaml:"routing-group,omitempty" json:"routing-group,omitempty"`
+
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
@@ -567,6 +589,9 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// RoutingGroup optionally overrides the parent provider RoutingGroup for this key.
+	RoutingGroup string `yaml:"routing-group,omitempty" json:"routing-group,omitempty"`
 
 	// Disabled indicates whether this API key is disabled.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
@@ -902,6 +927,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Kind = NormalizeOpenAICompatibilityKind(e.Kind)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.RoutingGroup = normalizeRoutingGroup(e.RoutingGroup)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		if len(e.APIKeyEntries) > 0 {
@@ -910,6 +936,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 				keyEntry := e.APIKeyEntries[j]
 				keyEntry.APIKey = strings.TrimSpace(keyEntry.APIKey)
 				keyEntry.ProxyURL = strings.TrimSpace(keyEntry.ProxyURL)
+				keyEntry.RoutingGroup = normalizeRoutingGroup(keyEntry.RoutingGroup)
 				if keyEntry.APIKey == "" && keyEntry.ProxyURL == "" && !keyEntry.Disabled {
 					continue
 				}
@@ -949,6 +976,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.RoutingGroup = normalizeRoutingGroup(e.RoutingGroup)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
@@ -968,6 +996,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.RoutingGroup = normalizeRoutingGroup(entry.RoutingGroup)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
@@ -989,6 +1018,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.RoutingGroup = normalizeRoutingGroup(entry.RoutingGroup)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
@@ -1013,6 +1043,10 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+func normalizeRoutingGroup(group string) string {
+	return strings.TrimSpace(group)
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.

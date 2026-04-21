@@ -171,13 +171,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		retryAfter := openAICompatRetryAfter(httpResp.Header, b)
-		logOpenAICompatUpstreamError(profile, auth, req.Model, httpResp.StatusCode, retryAfter, httpResp.Header.Get("Content-Type"), b)
-		err = statusErr{
-			code:       normalizeOpenAICompatStatus(httpResp.StatusCode, summarizeOpenAICompatError(b)),
-			msg:        summarizeOpenAICompatError(b),
-			retryAfter: retryAfter,
-		}
+		err = newOpenAICompatStatusErr(profile, auth, req.Model, httpResp.StatusCode, httpResp.Header, httpResp.Header.Get("Content-Type"), b)
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -287,13 +281,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		retryAfter := openAICompatRetryAfter(httpResp.Header, b)
-		logOpenAICompatUpstreamError(profile, auth, req.Model, httpResp.StatusCode, retryAfter, httpResp.Header.Get("Content-Type"), b)
-		err = statusErr{
-			code:       normalizeOpenAICompatStatus(httpResp.StatusCode, summarizeOpenAICompatError(b)),
-			msg:        summarizeOpenAICompatError(b),
-			retryAfter: retryAfter,
-		}
+		err = newOpenAICompatStatusErr(profile, auth, req.Model, httpResp.StatusCode, httpResp.Header, httpResp.Header.Get("Content-Type"), b)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

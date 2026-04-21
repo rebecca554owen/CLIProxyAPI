@@ -419,6 +419,8 @@ func durationUntilUnix(value float64, now time.Time) *time.Duration {
 func normalizeOpenAICompatStatus(code int, message string) int {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	switch {
+	case openAICompatPaymentLikeMessage(lower) && code != http.StatusPaymentRequired && code != http.StatusForbidden:
+		return http.StatusPaymentRequired
 	case openAICompatQuotaLikeMessage(lower) && code != http.StatusTooManyRequests:
 		return http.StatusTooManyRequests
 	case openAICompatAvailabilityMessage(lower) && (code == http.StatusBadRequest || code == http.StatusForbidden):
@@ -426,6 +428,20 @@ func normalizeOpenAICompatStatus(code int, message string) int {
 	default:
 		return code
 	}
+}
+
+func openAICompatPaymentLikeMessage(message string) bool {
+	return containsAny(message,
+		"payment required",
+		"insufficient balance",
+		"balance insufficient",
+		"account balance insufficient",
+		"余额不足",
+		"账户余额不足",
+		"帐户余额不足",
+		"钱包余额不足",
+		"充值后重试",
+	)
 }
 
 func openAICompatQuotaLikeMessage(message string) bool {
@@ -489,6 +505,17 @@ func logOpenAICompatUpstreamError(profile openAICompatProfile, auth *cliproxyaut
 		entry = entry.WithField("retry_after", retryAfter.String())
 	}
 	entry.Warnf("openai compat upstream error: %s", helps.SummarizeErrorBody(contentType, body))
+}
+
+func newOpenAICompatStatusErr(profile openAICompatProfile, auth *cliproxyauth.Auth, routeModel string, statusCode int, headers http.Header, contentType string, body []byte) statusErr {
+	retryAfter := openAICompatRetryAfter(headers, body)
+	logOpenAICompatUpstreamError(profile, auth, routeModel, statusCode, retryAfter, contentType, body)
+	message := summarizeOpenAICompatError(body)
+	return statusErr{
+		code:       normalizeOpenAICompatStatus(statusCode, message),
+		msg:        message,
+		retryAfter: retryAfter,
+	}
 }
 
 func (p openAICompatProfile) KindOrFallback(auth *cliproxyauth.Auth) string {
