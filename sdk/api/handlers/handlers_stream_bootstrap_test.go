@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"sync"
 	"testing"
 
@@ -524,11 +523,8 @@ func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError
 	if authErr.Code != "auth_not_found" {
 		t.Fatalf("code = %q, want %q", authErr.Code, "auth_not_found")
 	}
-	if !strings.Contains(authErr.Message, "providers=codex") {
-		t.Fatalf("message missing provider context: %q", authErr.Message)
-	}
-	if !strings.Contains(authErr.Message, "model=test-model") {
-		t.Fatalf("message missing model context: %q", authErr.Message)
+	if authErr.Message != "requested route is temporarily unavailable" {
+		t.Fatalf("message = %q, want %q", authErr.Message, "requested route is temporarily unavailable")
 	}
 
 	if executor.Calls() != 1 {

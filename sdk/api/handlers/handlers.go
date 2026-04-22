@@ -912,24 +912,9 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		return err
 	}
 
-	providerText := strings.Join(providers, ",")
-	if providerText == "" {
-		providerText = "unknown"
-	}
-	modelText := strings.TrimSpace(model)
-	if modelText == "" {
-		modelText = "unknown"
-	}
-
 	baseMessage := strings.TrimSpace(authErr.Message)
-	if baseMessage == "" {
-		baseMessage = "no auth available"
-	}
-	detail := fmt.Sprintf("%s (providers=%s, model=%s)", baseMessage, providerText, modelText)
-
-	// Clarify the most common alias confusion between Anthropic route names and internal provider keys.
-	if strings.Contains(","+providerText+",", ",claude,") {
-		detail += "; check Claude auth/key session and cooldown state via /v0/management/auth-files"
+	if baseMessage == "" || strings.EqualFold(baseMessage, "no auth available") {
+		baseMessage = "requested route is temporarily unavailable"
 	}
 
 	status := authErr.HTTPStatus
@@ -939,7 +924,7 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 
 	return &coreauth.Error{
 		Code:       authErr.Code,
-		Message:    detail,
+		Message:    baseMessage,
 		Retryable:  authErr.Retryable,
 		HTTPStatus: status,
 	}

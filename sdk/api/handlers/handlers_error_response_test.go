@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -69,7 +68,7 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 }
 
-func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
+func TestEnrichAuthSelectionError_DefaultsTo503WithConciseMessage(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_not_found", Message: "no auth available"}
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
 
@@ -80,14 +79,8 @@ func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 	if got.StatusCode() != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", got.StatusCode(), http.StatusServiceUnavailable)
 	}
-	if !strings.Contains(got.Message, "providers=claude") {
-		t.Fatalf("message missing provider context: %q", got.Message)
-	}
-	if !strings.Contains(got.Message, "model=claude-sonnet-4-6") {
-		t.Fatalf("message missing model context: %q", got.Message)
-	}
-	if !strings.Contains(got.Message, "/v0/management/auth-files") {
-		t.Fatalf("message missing management hint: %q", got.Message)
+	if got.Message != "requested route is temporarily unavailable" {
+		t.Fatalf("message = %q, want %q", got.Message, "requested route is temporarily unavailable")
 	}
 }
 
