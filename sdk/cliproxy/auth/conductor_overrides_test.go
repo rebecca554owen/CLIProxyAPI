@@ -111,6 +111,52 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_AuthSupportsRouteModel_EmptyRegistryForAPIKeyAuthDoesNotMatch(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "claude-apikey-empty-registry",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if got := m.authSupportsRouteModel(reg, auth, "qwen3-coder-plus"); got {
+		t.Fatal("expected api key auth without registered models to be rejected")
+	}
+}
+
+func TestManager_AuthSupportsRouteModel_EmptyRegistryForOAuthAuthStillMatches(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "claude-oauth-empty-registry",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"type": "claude",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if got := m.authSupportsRouteModel(reg, auth, "claude-sonnet-4-6"); !got {
+		t.Fatal("expected oauth auth without registered models to preserve legacy support-all behavior")
+	}
+}
+
 func TestManager_ShouldRetryAfterError_SequentialFillUsesConfiguredRequestRetry(t *testing.T) {
 	m := NewManager(nil, &SequentialFillSelector{}, nil)
 	m.SetRetryConfig(5, 30*time.Second, 0)

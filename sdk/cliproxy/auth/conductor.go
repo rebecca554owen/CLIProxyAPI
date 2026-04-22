@@ -948,11 +948,27 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if routeKey == "" {
 		return true
 	}
+	if registeredModels := registryRef.GetModelsForClient(auth.ID); len(registeredModels) == 0 {
+		return !authRequiresRegisteredModels(auth)
+	}
 	if registryRef.ClientSupportsModel(auth.ID, routeKey) {
 		return true
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
 	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+}
+
+func authRequiresRegisteredModels(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes != nil {
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes["auth_kind"]), "apikey") {
+			return true
+		}
+	}
+	accountKind, _ := auth.AccountInfo()
+	return strings.EqualFold(accountKind, "api_key")
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
