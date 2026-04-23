@@ -513,6 +513,9 @@ func TestConfigSynthesizer_OpenAICompat_WithModelsHash(t *testing.T) {
 	if auths[0].Attributes["api_key"] != "key-with-models" {
 		t.Errorf("expected api_key key-with-models, got %s", auths[0].Attributes["api_key"])
 	}
+	if auths[0].Attributes["provider_family"] != "openai-compatibility" {
+		t.Errorf("expected provider_family openai-compatibility, got %s", auths[0].Attributes["provider_family"])
+	}
 }
 
 func TestConfigSynthesizer_OpenAICompat_FallbackWithModels(t *testing.T) {
@@ -547,6 +550,9 @@ func TestConfigSynthesizer_OpenAICompat_FallbackWithModels(t *testing.T) {
 	}
 	if auths[0].Attributes["header:X-API"] != "header-value" {
 		t.Errorf("expected header:X-API=header-value, got %s", auths[0].Attributes["header:X-API"])
+	}
+	if auths[0].Attributes["provider_family"] != "openai-compatibility" {
+		t.Errorf("expected provider_family openai-compatibility, got %s", auths[0].Attributes["provider_family"])
 	}
 }
 

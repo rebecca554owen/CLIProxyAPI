@@ -905,6 +905,58 @@ func commonProviderKey(auths []*Auth) string {
 	return providerKey
 }
 
+func authProviderFamilyKey(auth *Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	if value := normalizeRoutingGroupKey(auth.Attributes["provider_family"]); value != "" {
+		return value
+	}
+	for _, key := range []string{"provider_type", "provider-type"} {
+		if value := normalizeRoutingGroupKey(auth.Attributes[key]); value != "" {
+			return value
+		}
+	}
+	if normalizeRoutingGroupKey(auth.Attributes["compat_name"]) != "" || normalizeRoutingGroupKey(auth.Attributes["provider_key"]) != "" {
+		return "openai-compatibility"
+	}
+	return ""
+}
+
+func commonProviderFamilyKey(auths []*Auth) string {
+	providerKey := ""
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		current := authProviderFamilyKey(auth)
+		if current == "" {
+			return ""
+		}
+		if providerKey == "" {
+			providerKey = current
+			continue
+		}
+		if providerKey != current {
+			return ""
+		}
+	}
+	return providerKey
+}
+
+func commonProviderStrategyKeys(auths []*Auth) []string {
+	exact := commonProviderKey(auths)
+	family := commonProviderFamilyKey(auths)
+	keys := make([]string, 0, 2)
+	if exact != "" {
+		keys = append(keys, exact)
+	}
+	if family != "" && family != exact {
+		keys = append(keys, family)
+	}
+	return keys
+}
+
 func (m *Manager) routingStrategyForAuths(auths []*Auth) (string, string, bool) {
 	if overrides := m.routingGroupStrategies(); len(overrides) > 0 {
 		group := commonRoutingGroup(auths)
@@ -915,8 +967,7 @@ func (m *Manager) routingStrategyForAuths(auths []*Auth) (string, string, bool) 
 		}
 	}
 	if overrides := m.routingProviderStrategies(); len(overrides) > 0 {
-		providerKey := commonProviderKey(auths)
-		if providerKey != "" {
+		for _, providerKey := range commonProviderStrategyKeys(auths) {
 			if strategy, ok := overrides[providerKey]; ok {
 				return "provider:" + providerKey, strategy, true
 			}

@@ -117,6 +117,53 @@ func TestManagerSelectorForAuths_UsesProviderOverrideWhenGroupsDiffer(t *testing
 	}
 }
 
+func TestManagerSelectorForAuths_UsesOpenAICompatibilityFamilyOverride(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			ProviderStrategies: map[string]string{
+				"openai-compatibility": "spread",
+			},
+		},
+	})
+
+	auths := []*Auth{
+		{ID: "b", Provider: "kimi", Attributes: map[string]string{"provider_family": "openai-compatibility"}},
+		{ID: "a", Provider: "zhipu", Attributes: map[string]string{"provider_family": "openai-compatibility"}},
+	}
+
+	selector := manager.selectorForAuths(auths)
+	if _, ok := selector.(*SpreadSelector); !ok {
+		t.Fatalf("selectorForAuths() = %T, want *SpreadSelector", selector)
+	}
+}
+
+func TestManagerSelectorForAuths_PrefersExactProviderOverrideOverFamily(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			ProviderStrategies: map[string]string{
+				"kimi":                 "fill-first",
+				"openai-compatibility": "spread",
+			},
+		},
+	})
+
+	auths := []*Auth{
+		{ID: "b", Provider: "kimi", Attributes: map[string]string{"provider_family": "openai-compatibility"}},
+		{ID: "a", Provider: "kimi", Attributes: map[string]string{"provider_family": "openai-compatibility"}},
+	}
+
+	selector := manager.selectorForAuths(auths)
+	if _, ok := selector.(*FillFirstSelector); !ok {
+		t.Fatalf("selectorForAuths() = %T, want *FillFirstSelector", selector)
+	}
+}
+
 func TestAuthRoutingGroup_PrefersCompatKindOverPrefix(t *testing.T) {
 	t.Parallel()
 

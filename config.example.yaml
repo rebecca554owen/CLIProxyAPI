@@ -121,6 +121,7 @@ routing:
   # New credentials added under the same provider automatically inherit it.
   # provider-strategies:
   #   claude: "spread"
+  #   openai-compatibility: "spread"
   #   codex: "round-robin"
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,

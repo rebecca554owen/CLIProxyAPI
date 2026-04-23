@@ -238,10 +238,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":     base,
-				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"source":          fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":        base,
+				"compat_name":     compat.Name,
+				"provider_family": "openai-compatibility",
+				"provider_key":    providerName,
 			}
 			routingGroup := strings.TrimSpace(entry.RoutingGroup)
 			if routingGroup == "" {
@@ -287,10 +288,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, base)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":     base,
-				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"source":          fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":        base,
+				"compat_name":     compat.Name,
+				"provider_family": "openai-compatibility",
+				"provider_key":    providerName,
 			}
 			if routingGroup := strings.TrimSpace(compat.RoutingGroup); routingGroup != "" {
 				attrs["routing_group"] = routingGroup

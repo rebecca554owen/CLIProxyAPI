@@ -39,12 +39,15 @@ routing:
     codex: "round-robin"
   provider-strategies:
     claude: "spread"
+    openai-compatibility: "spread"
 ```
 
 Credentials can opt into a specific routing group with `routing-group`, so one
 deployment can keep Codex on round-robin while routing MiniMax / Kimi through
 stable-first semantics. If you want all future `claude-api-key` credentials to
-spread load more evenly, set `provider-strategies.claude: "spread"`.
+spread load more evenly, set `provider-strategies.claude: "spread"`. For
+future OpenAI-compatible providers, set
+`provider-strategies.openai-compatibility: "spread"`.
 
 ### Usage Statistics Persistence
 
