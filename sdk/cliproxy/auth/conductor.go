@@ -218,6 +218,17 @@ func isBuiltInSelector(selector Selector) bool {
 	}
 }
 
+func selectorUsesSpread(selector Selector) bool {
+	switch s := selector.(type) {
+	case *SpreadSelector:
+		return true
+	case *SessionAffinitySelector:
+		return selectorUsesSpread(s.fallback)
+	default:
+		return false
+	}
+}
+
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
 	if m == nil || m.scheduler == nil {
 		return
@@ -659,6 +670,8 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
+	spreadAcrossPriorities := selectorUsesSpread(m.selectorForAuths(auths))
+	availableAll := make([]*Auth, 0, len(auths))
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
 	var earliest time.Time
@@ -674,6 +687,10 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 				}
 				continue
 			}
+			availableAll = append(availableAll, candidate)
+			if spreadAcrossPriorities {
+				continue
+			}
 			priority := effectiveSelectionPriority(candidate, checkModel, now)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
@@ -684,6 +701,27 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 				earliest = next
 			}
 		}
+	}
+
+	if spreadAcrossPriorities {
+		if len(availableAll) == 0 {
+			if cooldownCount == len(auths) && !earliest.IsZero() {
+				providerForError := provider
+				if providerForError == "mixed" {
+					providerForError = ""
+				}
+				resetIn := earliest.Sub(now)
+				if resetIn < 0 {
+					resetIn = 0
+				}
+				return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+			}
+			return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		}
+		if len(availableAll) > 1 {
+			sort.Slice(availableAll, func(i, j int) bool { return availableAll[i].ID < availableAll[j].ID })
+		}
+		return availableAll, nil
 	}
 
 	if len(availableByPriority) == 0 {

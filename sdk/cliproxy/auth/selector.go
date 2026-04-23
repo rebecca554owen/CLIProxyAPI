@@ -33,9 +33,10 @@ type RoundRobinSelector struct {
 // SpreadSelector rotates evenly across all available credentials, ignoring
 // static priority buckets while still respecting disabled/cooldown state.
 type SpreadSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu             sync.Mutex
+	cursors        map[string]int
+	currentWeights map[string]map[string]int
+	maxKeys        int
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -222,6 +223,27 @@ func healthTier(auth *Auth, model string, now time.Time) int {
 
 func effectiveSelectionPriority(auth *Auth, model string, now time.Time) int {
 	return authPriority(auth)*healthPriorityMultiplier + healthTier(auth, model, now)
+}
+
+func spreadSelectionWeight(auth *Auth, model string, now time.Time) int {
+	priority := authPriority(auth)
+	if priority < 0 {
+		priority = 0
+	}
+	if priority > 20 {
+		priority = 20
+	}
+	baseWeight := priority + 1
+
+	score := recoveredHealthScore(resolveHealthState(auth, model), now)
+	if score < 10 {
+		score = 10
+	}
+	weight := (baseWeight*score + healthScoreDefault - 1) / healthScoreDefault
+	if weight < 1 {
+		return 1
+	}
+	return weight
 }
 
 func canonicalModelKey(model string) string {
@@ -475,6 +497,9 @@ func (s *SpreadSelector) Pick(ctx context.Context, provider, model string, opts 
 	if s.cursors == nil {
 		s.cursors = make(map[string]int)
 	}
+	if s.currentWeights == nil {
+		s.currentWeights = make(map[string]map[string]int)
+	}
 	limit := s.maxKeys
 	if limit <= 0 {
 		limit = 4096
@@ -507,20 +532,67 @@ func (s *SpreadSelector) Pick(ctx context.Context, provider, model string, opts 
 		return group[innerIndex%len(group)], nil
 	}
 
-	s.ensureCursorKey(key, limit)
-	index := s.cursors[key]
-	if index >= 2_147_483_640 {
-		index = 0
-	}
-	s.cursors[key] = index + 1
+	selected := s.pickWeightedLocked(key, model, now, available, limit)
 	s.mu.Unlock()
-	return available[index%len(available)], nil
+	if selected == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	return selected, nil
 }
 
 func (s *SpreadSelector) ensureCursorKey(key string, limit int) {
 	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
 		s.cursors = make(map[string]int)
 	}
+}
+
+func (s *SpreadSelector) ensureWeightKey(key string, limit int) {
+	if _, ok := s.currentWeights[key]; !ok && len(s.currentWeights) >= limit {
+		s.currentWeights = make(map[string]map[string]int)
+	}
+}
+
+func (s *SpreadSelector) pickWeightedLocked(key, model string, now time.Time, available []*Auth, limit int) *Auth {
+	if len(available) == 0 {
+		return nil
+	}
+	weightKey := key + "::weighted"
+	s.ensureWeightKey(weightKey, limit)
+	state := s.currentWeights[weightKey]
+	if state == nil {
+		state = make(map[string]int, len(available))
+		s.currentWeights[weightKey] = state
+	}
+
+	active := make(map[string]struct{}, len(available))
+	totalWeight := 0
+	var selected *Auth
+	selectedKey := ""
+	selectedScore := 0
+	for i, auth := range available {
+		authKey := strings.TrimSpace(auth.ID)
+		if authKey == "" {
+			authKey = fmt.Sprintf("__index_%d", i)
+		}
+		active[authKey] = struct{}{}
+		weight := spreadSelectionWeight(auth, model, now)
+		totalWeight += weight
+		state[authKey] += weight
+		if selected == nil || state[authKey] > selectedScore {
+			selected = auth
+			selectedKey = authKey
+			selectedScore = state[authKey]
+		}
+	}
+	for authKey := range state {
+		if _, ok := active[authKey]; !ok {
+			delete(state, authKey)
+		}
+	}
+	if selected != nil && totalWeight > 0 {
+		state[selectedKey] -= totalWeight
+	}
+	return selected
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.

@@ -71,21 +71,61 @@ func TestSpreadSelectorPick_CyclesAcrossAllAvailableIgnoringPriority(t *testing.
 		{ID: "auth-c", Provider: "claude", Attributes: map[string]string{"priority": "5"}},
 	}
 
-	got1, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
-	if err != nil {
-		t.Fatalf("Pick() first error = %v", err)
-	}
-	got2, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
-	if err != nil {
-		t.Fatalf("Pick() second error = %v", err)
-	}
-	got3, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
-	if err != nil {
-		t.Fatalf("Pick() third error = %v", err)
+	counts := make(map[string]int)
+	for i := 0; i < 38; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
 	}
 
-	if got1.ID != "auth-a" || got2.ID != "auth-b" || got3.ID != "auth-c" {
-		t.Fatalf("SpreadSelector picks = [%s %s %s], want [auth-a auth-b auth-c]", got1.ID, got2.ID, got3.ID)
+	if counts["auth-a"] == 0 || counts["auth-b"] == 0 || counts["auth-c"] == 0 {
+		t.Fatalf("SpreadSelector counts = %+v, want every priority bucket to receive traffic", counts)
+	}
+	if counts["auth-a"] <= counts["auth-b"] || counts["auth-b"] <= counts["auth-c"] {
+		t.Fatalf("SpreadSelector counts = %+v, want higher priority auths to receive more weighted traffic", counts)
+	}
+}
+
+func TestSpreadSelectorPick_LowersWeightForUnhealthyAuth(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	selector := &SpreadSelector{}
+	auths := []*Auth{
+		{
+			ID:         "unhealthy",
+			Provider:   "claude",
+			Attributes: map[string]string{"priority": "10"},
+			Health: HealthState{
+				Observed:      true,
+				Score:         20,
+				LastUpdatedAt: now,
+				LastFailureAt: now,
+			},
+		},
+		{
+			ID:         "healthy",
+			Provider:   "claude",
+			Attributes: map[string]string{"priority": "10"},
+		},
+	}
+
+	counts := make(map[string]int)
+	for i := 0; i < 28; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+
+	if counts["unhealthy"] == 0 {
+		t.Fatalf("SpreadSelector counts = %+v, want unhealthy auth to keep a small share", counts)
+	}
+	if counts["healthy"] <= counts["unhealthy"] {
+		t.Fatalf("SpreadSelector counts = %+v, want healthy auth to receive more traffic", counts)
 	}
 }
 

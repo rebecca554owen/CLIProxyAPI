@@ -3,6 +3,8 @@ package auth
 import (
 	"testing"
 	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 func TestGetAvailableAuths_PrefersHealthierAuthWithinSamePriority(t *testing.T) {
@@ -180,6 +182,41 @@ func TestManagerAvailableAuthsForRouteModel_HealthOpenBlocksSelection(t *testing
 	}
 	if len(available) != 1 || available[0].ID != "b" {
 		t.Fatalf("availableAuthsForRouteModel() = %+v, want only auth b", available)
+	}
+}
+
+func TestManagerAvailableAuthsForRouteModel_SpreadKeepsLowerPriorityCandidates(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			ProviderStrategies: map[string]string{
+				"claude": "spread",
+			},
+		},
+	})
+	authA := &Auth{
+		ID:         "a",
+		Provider:   "claude",
+		Attributes: map[string]string{"priority": "20"},
+	}
+	authB := &Auth{
+		ID:         "b",
+		Provider:   "claude",
+		Attributes: map[string]string{"priority": "5"},
+	}
+
+	available, err := manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", "claude-sonnet-4-6", now)
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel() error = %v", err)
+	}
+	if len(available) != 2 {
+		t.Fatalf("availableAuthsForRouteModel() len = %d, want 2 spread candidates across priority buckets", len(available))
+	}
+	if available[0].ID != "a" || available[1].ID != "b" {
+		t.Fatalf("availableAuthsForRouteModel() ids = [%s %s], want [a b]", available[0].ID, available[1].ID)
 	}
 }
 
