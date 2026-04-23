@@ -310,6 +310,10 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if state == nil {
 				continue
 			}
+			if isPersistedModelSupportState(state) {
+				registry.GetGlobalRegistry().SuspendClientModel(authID, baseModel, "model_not_supported")
+				continue
+			}
 			if modelStateIsClean(state) {
 				continue
 			}
@@ -1080,7 +1084,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
-				if isUnauthorizedResult(rerr) {
+				if shouldEvictUnauthorizedResult(rerr) {
 					if errEvict := m.evictUnauthorizedAuth(ctx, auth, provider, resultModel); errEvict != nil {
 						logEntryWithRequestID(ctx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
 					}
@@ -1141,7 +1145,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
-			if isUnauthorizedError(errStream) {
+			if shouldEvictUnauthorizedError(errStream) {
 				return nil, errStream
 			}
 			if isRequestInvalidError(errStream) {
@@ -1168,7 +1172,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
-			if isUnauthorizedError(bootstrapErr) {
+			if shouldEvictUnauthorizedError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
@@ -1642,7 +1646,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
-				if isUnauthorizedError(errExec) {
+				if shouldEvictUnauthorizedError(errExec) {
 					if errEvict := m.evictUnauthorizedAuth(execCtx, auth, provider, resultModel); errEvict != nil {
 						logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
 					}
@@ -1732,7 +1736,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
-				if isUnauthorizedError(errExec) {
+				if shouldEvictUnauthorizedError(errExec) {
 					if errEvict := m.evictUnauthorizedAuth(execCtx, auth, provider, resultModel); errEvict != nil {
 						logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
 					}
@@ -1814,7 +1818,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if isUnauthorizedError(errStream) {
+			if shouldEvictUnauthorizedError(errStream) {
 				if errEvict := m.evictUnauthorizedAuth(execCtx, auth, provider, routeModel); errEvict != nil {
 					logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
 				}
@@ -2453,6 +2457,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						auth.StatusMessage = result.Error.Message
 					}
 					if isModelSupportResultError(result.Error) {
+						state.Status = StatusDisabled
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
@@ -2890,6 +2895,14 @@ func isUnauthorizedError(err error) bool {
 	return statusCodeFromError(err) == http.StatusUnauthorized
 }
 
+func shouldEvictUnauthorizedError(err error) bool {
+	return isUnauthorizedError(err) && !isModelSupportError(err)
+}
+
+func shouldEvictUnauthorizedResult(err *Error) bool {
+	return isUnauthorizedResult(err) && !isModelSupportResultError(err)
+}
+
 func retryAfterFromError(err error) *time.Duration {
 	if err == nil {
 		return nil
@@ -2963,7 +2976,7 @@ func isModelSupportError(err error) bool {
 	}
 	status := statusCodeFromError(err)
 	switch status {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
 	default:
 		return false
 	}
@@ -2976,11 +2989,21 @@ func isModelSupportResultError(err *Error) bool {
 	}
 	status := statusCodeFromResult(err)
 	switch status {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
 	default:
 		return false
 	}
 	return isModelSupportErrorMessage(err.Message)
+}
+
+func isPersistedModelSupportState(state *ModelState) bool {
+	if state == nil || state.Status != StatusDisabled {
+		return false
+	}
+	if state.LastError != nil && isModelSupportResultError(state.LastError) {
+		return true
+	}
+	return isModelSupportErrorMessage(state.StatusMessage)
 }
 
 func isRetryableAvailabilityErrorMessage(message string) bool {

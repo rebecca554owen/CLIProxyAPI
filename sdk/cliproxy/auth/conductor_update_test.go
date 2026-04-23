@@ -2,7 +2,11 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
@@ -200,5 +204,57 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
+	}
+}
+
+func TestManager_ReconcileRegistryModelStates_PreservesUnsupportedModelDisabledState(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	model := "gpt-5.3-codex-spark"
+	auth := &Auth{
+		ID:       "auth-unsupported-model",
+		Provider: "codex",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusDisabled,
+				StatusMessage:  "invalid_request_error: The requested model is not supported.",
+				Unavailable:    true,
+				NextRetryAfter: time.Now().Add(12 * time.Hour),
+				LastError: &Error{
+					HTTPStatus: http.StatusBadRequest,
+					Message:    "invalid_request_error: The requested model is not supported.",
+				},
+			},
+		},
+	}
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	m.ReconcileRegistryModelStates(context.Background(), auth.ID)
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q to be preserved", model)
+	}
+	if state.Status != StatusDisabled {
+		t.Fatalf("expected model state status %q, got %q", StatusDisabled, state.Status)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected model state to remain unavailable")
+	}
+	if state.LastError == nil {
+		t.Fatalf("expected last error to be preserved")
 	}
 }
