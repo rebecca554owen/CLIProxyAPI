@@ -61,6 +61,34 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
+func TestSpreadSelectorPick_CyclesAcrossAllAvailableIgnoringPriority(t *testing.T) {
+	t.Parallel()
+
+	selector := &SpreadSelector{}
+	auths := []*Auth{
+		{ID: "auth-b", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+		{ID: "auth-a", Provider: "claude", Attributes: map[string]string{"priority": "20"}},
+		{ID: "auth-c", Provider: "claude", Attributes: map[string]string{"priority": "5"}},
+	}
+
+	got1, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	got2, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	got3, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() third error = %v", err)
+	}
+
+	if got1.ID != "auth-a" || got2.ID != "auth-b" || got3.ID != "auth-c" {
+		t.Fatalf("SpreadSelector picks = [%s %s %s], want [auth-a auth-b auth-c]", got1.ID, got2.ID, got3.ID)
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 

@@ -30,6 +30,14 @@ type RoundRobinSelector struct {
 	maxKeys int
 }
 
+// SpreadSelector rotates evenly across all available credentials, ignoring
+// static priority buckets while still respecting disabled/cooldown state.
+type SpreadSelector struct {
+	mu      sync.Mutex
+	cursors map[string]int
+	maxKeys int
+}
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
@@ -305,6 +313,25 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 	return available, cooldownCount, earliest
 }
 
+func collectAvailableIgnoringPriority(auths []*Auth, model string, now time.Time) (available []*Auth, cooldownCount int, earliest time.Time) {
+	available = make([]*Auth, 0, len(auths))
+	for i := 0; i < len(auths); i++ {
+		candidate := auths[i]
+		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
+		if !blocked {
+			available = append(available, candidate)
+			continue
+		}
+		if reason == blockReasonCooldown {
+			cooldownCount++
+			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
+				earliest = next
+			}
+		}
+	}
+	return available, cooldownCount, earliest
+}
+
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -336,6 +363,33 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 	}
 
 	available := availableByPriority[bestPriority]
+	if len(available) > 1 {
+		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+	}
+	return available, nil
+}
+
+func getSpreadAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+
+	available, cooldownCount, earliest := collectAvailableIgnoringPriority(auths, model, now)
+	if len(available) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			resetIn := earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
+			return nil, newModelCooldownError(model, providerForError, resetIn)
+		}
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
@@ -405,6 +459,68 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	s.cursors[key] = index + 1
 	s.mu.Unlock()
 	return available[index%len(available)], nil
+}
+
+// Pick selects the next available auth in an even spread across every non-blocked credential.
+func (s *SpreadSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getSpreadAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	key := provider + ":" + canonicalModelKey(model)
+	s.mu.Lock()
+	if s.cursors == nil {
+		s.cursors = make(map[string]int)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+
+	groups, parentOrder := groupByVirtualParent(available)
+	if len(parentOrder) > 1 {
+		groupKey := key + "::group"
+		s.ensureCursorKey(groupKey, limit)
+		if _, exists := s.cursors[groupKey]; !exists {
+			s.cursors[groupKey] = rand.IntN(len(parentOrder))
+		}
+		groupIndex := s.cursors[groupKey]
+		if groupIndex >= 2_147_483_640 {
+			groupIndex = 0
+		}
+		s.cursors[groupKey] = groupIndex + 1
+
+		selectedParent := parentOrder[groupIndex%len(parentOrder)]
+		group := groups[selectedParent]
+
+		innerKey := key + "::cred:" + selectedParent
+		s.ensureCursorKey(innerKey, limit)
+		innerIndex := s.cursors[innerKey]
+		if innerIndex >= 2_147_483_640 {
+			innerIndex = 0
+		}
+		s.cursors[innerKey] = innerIndex + 1
+		s.mu.Unlock()
+		return group[innerIndex%len(group)], nil
+	}
+
+	s.ensureCursorKey(key, limit)
+	index := s.cursors[key]
+	if index >= 2_147_483_640 {
+		index = 0
+	}
+	s.cursors[key] = index + 1
+	s.mu.Unlock()
+	return available[index%len(available)], nil
+}
+
+func (s *SpreadSelector) ensureCursorKey(key string, limit int) {
+	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
+		s.cursors = make(map[string]int)
+	}
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.

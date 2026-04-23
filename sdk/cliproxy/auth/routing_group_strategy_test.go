@@ -29,6 +29,27 @@ func TestNormalizeRoutingGroupStrategies(t *testing.T) {
 	}
 }
 
+func TestNormalizeRoutingProviderStrategies(t *testing.T) {
+	t.Parallel()
+
+	got := NormalizeRoutingProviderStrategies(map[string]string{
+		" Claude ": "balanced",
+		"":         "spread",
+		"bad":      "unknown",
+		"Codex":    "rr",
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("NormalizeRoutingProviderStrategies() len = %d, want 2", len(got))
+	}
+	if got["claude"] != RoutingStrategySpread {
+		t.Fatalf("NormalizeRoutingProviderStrategies().claude = %q, want %q", got["claude"], RoutingStrategySpread)
+	}
+	if got["codex"] != RoutingStrategyRoundRobin {
+		t.Fatalf("NormalizeRoutingProviderStrategies().codex = %q, want %q", got["codex"], RoutingStrategyRoundRobin)
+	}
+}
+
 func TestManagerSelectorForAuths_UsesRoutingGroupOverride(t *testing.T) {
 	t.Parallel()
 
@@ -67,6 +88,48 @@ func TestManagerSelectorForAuths_UsesRoutingGroupOverride(t *testing.T) {
 	}
 	if got1.ID != "a" || got2.ID != "a" {
 		t.Fatalf("FillFirst override picked %q and %q, want both %q", got1.ID, got2.ID, "a")
+	}
+}
+
+func TestManagerSelectorForAuths_UsesProviderOverrideWhenGroupsDiffer(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			ProviderStrategies: map[string]string{
+				"claude": "spread",
+			},
+		},
+	})
+
+	auths := []*Auth{
+		{ID: "b", Provider: "claude", Prefix: "MiniMax-国内"},
+		{ID: "a", Provider: "claude", Prefix: "国际版-MiniMax"},
+	}
+
+	selector := manager.selectorForAuths(auths)
+	if _, ok := selector.(*SpreadSelector); !ok {
+		t.Fatalf("selectorForAuths() = %T, want *SpreadSelector", selector)
+	}
+	if manager.useSchedulerFastPath() {
+		t.Fatal("useSchedulerFastPath() = true, want false when provider strategies are configured")
+	}
+}
+
+func TestAuthRoutingGroup_PrefersCompatKindOverPrefix(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "claude",
+		Prefix:   "国际版-MiniMax-HighSpeed",
+		Attributes: map[string]string{
+			"compat_kind": "MiniMax",
+		},
+	}
+
+	if got := authRoutingGroup(auth); got != "minimax" {
+		t.Fatalf("authRoutingGroup() = %q, want %q", got, "minimax")
 	}
 }
 

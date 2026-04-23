@@ -9,6 +9,8 @@ const (
 	RoutingStrategyFillFirst = "fill-first"
 	// RoutingStrategySequentialFill sticks to the current credential until it becomes unavailable.
 	RoutingStrategySequentialFill = "sequential-fill"
+	// RoutingStrategySpread rotates across all available credentials, ignoring static priority buckets.
+	RoutingStrategySpread = "spread"
 )
 
 // NormalizeRoutingStrategy canonicalizes supported routing strategy names and aliases.
@@ -20,6 +22,8 @@ func NormalizeRoutingStrategy(strategy string) (string, bool) {
 		return RoutingStrategyFillFirst, true
 	case RoutingStrategySequentialFill, "sequentialfill", "sf":
 		return RoutingStrategySequentialFill, true
+	case RoutingStrategySpread, "balanced", "even", "even-round-robin", "balanced-round-robin":
+		return RoutingStrategySpread, true
 	default:
 		return "", false
 	}
@@ -37,6 +41,8 @@ func SelectorForRoutingStrategy(strategy string) Selector {
 		return &FillFirstSelector{}
 	case RoutingStrategySequentialFill:
 		return &SequentialFillSelector{}
+	case RoutingStrategySpread:
+		return &SpreadSelector{}
 	default:
 		return &RoundRobinSelector{}
 	}
@@ -63,6 +69,30 @@ func NormalizeRoutingGroupStrategies(overrides map[string]string) map[string]str
 			continue
 		}
 		out[normalizedGroup] = normalizedStrategy
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeRoutingProviderStrategies canonicalizes provider strategy overrides.
+// Empty provider names and unsupported strategies are discarded.
+func NormalizeRoutingProviderStrategies(overrides map[string]string) map[string]string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(overrides))
+	for provider, strategy := range overrides {
+		normalizedProvider := normalizeRoutingGroupKey(provider)
+		if normalizedProvider == "" {
+			continue
+		}
+		normalizedStrategy, ok := NormalizeRoutingStrategy(strategy)
+		if !ok {
+			continue
+		}
+		out[normalizedProvider] = normalizedStrategy
 	}
 	if len(out) == 0 {
 		return nil

@@ -37,10 +37,14 @@ routing:
     minimax: "sf"
     kimi: "sf"
     codex: "round-robin"
+  provider-strategies:
+    claude: "spread"
 ```
 
 每个凭证还可以通过 `routing-group` 归入指定路由池，这样同一个部署里
 就能让 MiniMax / Kimi 走稳定优先，而 Codex 继续保持轮转策略。
+如果你希望以后新增的 `claude-api-key` 也自动更均匀地分散流量，可以
+直接设置 `provider-strategies.claude: "spread"`。
 
 ### 使用量统计持久化
 

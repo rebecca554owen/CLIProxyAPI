@@ -37,11 +37,14 @@ routing:
     minimax: "sf"
     kimi: "sf"
     codex: "round-robin"
+  provider-strategies:
+    claude: "spread"
 ```
 
 Credentials can opt into a specific routing group with `routing-group`, so one
 deployment can keep Codex on round-robin while routing MiniMax / Kimi through
-stable-first semantics.
+stable-first semantics. If you want all future `claude-api-key` credentials to
+spread load more evenly, set `provider-strategies.claude: "spread"`.
 
 ### Usage Statistics Persistence
 

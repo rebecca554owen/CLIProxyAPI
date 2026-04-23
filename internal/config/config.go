@@ -221,7 +221,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first", "sequential-fill" ("sf").
+	// Supported values: "round-robin" (default), "fill-first", "sequential-fill" ("sf"), "spread".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// GroupStrategies overrides the global strategy for a specific routing group.
@@ -229,6 +229,12 @@ type RoutingConfig struct {
 	// credential-level "routing-group" fields or built-in fallbacks such as
 	// OpenAI-compat provider names and credential prefixes.
 	GroupStrategies map[string]string `yaml:"group-strategies,omitempty" json:"group-strategies,omitempty"`
+
+	// ProviderStrategies overrides the global strategy for a provider family.
+	// Keys are matched against auth.Provider (for example "claude", "codex", "gemini").
+	// This is useful when future credentials should automatically inherit a
+	// provider-wide policy without requiring per-key routing-group labels.
+	ProviderStrategies map[string]string `yaml:"provider-strategies,omitempty" json:"provider-strategies,omitempty"`
 
 	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.
 	// When enabled, requests with the same session ID (extracted from metadata.user_id)
@@ -631,6 +637,30 @@ func InferCompatKindFromBaseURL(rawBaseURL string) string {
 	case "api.minimaxi.com", "api.minimaxi.io":
 		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
 			return "minimax"
+		}
+	case "api.kimi.com":
+		if path == "/coding" || strings.HasPrefix(path, "/coding/") {
+			return "kimi"
+		}
+	case "open.bigmodel.cn", "maas-api.lanyun.net":
+		if path == "/api/anthropic" || path == "/anthropic" || strings.HasPrefix(path, "/api/anthropic/") || strings.HasPrefix(path, "/anthropic/") {
+			return "zhipu"
+		}
+	case "maas-coding-api.cn-huabei-1.xf-yun.com":
+		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
+			return "xfyun"
+		}
+	case "token-plan-cn.xiaomimimo.com":
+		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
+			return "xiaomi"
+		}
+	case "coding.dashscope.aliyuncs.com":
+		if path == "/apps/anthropic" || strings.HasPrefix(path, "/apps/anthropic/") {
+			return "qwen"
+		}
+	case "ark.cn-beijing.volces.com":
+		if path == "/api/coding" || strings.HasPrefix(path, "/api/coding/") {
+			return "doubao"
 		}
 	}
 	return ""

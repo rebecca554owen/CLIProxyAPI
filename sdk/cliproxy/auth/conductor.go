@@ -385,7 +385,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	if !m.hasRoutingGroupStrategies() {
+	if !m.hasRoutingStrategyOverrides() {
 		m.stopDynamicSelectors()
 	}
 }
@@ -813,6 +813,9 @@ func authRoutingGroup(auth *Auth) string {
 				return value
 			}
 		}
+		if value := normalizeRoutingGroupKey(auth.Attributes["compat_kind"]); value != "" {
+			return value
+		}
 		if value := normalizeRoutingGroupKey(auth.Attributes["compat_name"]); value != "" {
 			return value
 		}
@@ -858,24 +861,68 @@ func (m *Manager) routingGroupStrategies() map[string]string {
 	return NormalizeRoutingGroupStrategies(cfg.Routing.GroupStrategies)
 }
 
+func (m *Manager) routingProviderStrategies() map[string]string {
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return nil
+	}
+	return NormalizeRoutingProviderStrategies(cfg.Routing.ProviderStrategies)
+}
+
 func (m *Manager) hasRoutingGroupStrategies() bool {
 	return len(m.routingGroupStrategies()) > 0
 }
 
+func (m *Manager) hasRoutingProviderStrategies() bool {
+	return len(m.routingProviderStrategies()) > 0
+}
+
+func (m *Manager) hasRoutingStrategyOverrides() bool {
+	return m.hasRoutingGroupStrategies() || m.hasRoutingProviderStrategies()
+}
+
+func commonProviderKey(auths []*Auth) string {
+	providerKey := ""
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		current := normalizeRoutingGroupKey(auth.Provider)
+		if current == "" {
+			return ""
+		}
+		if providerKey == "" {
+			providerKey = current
+			continue
+		}
+		if providerKey != current {
+			return ""
+		}
+	}
+	return providerKey
+}
+
 func (m *Manager) routingStrategyForAuths(auths []*Auth) (string, string, bool) {
-	overrides := m.routingGroupStrategies()
-	if len(overrides) == 0 {
-		return "", "", false
+	if overrides := m.routingGroupStrategies(); len(overrides) > 0 {
+		group := commonRoutingGroup(auths)
+		if group != "" {
+			if strategy, ok := overrides[group]; ok {
+				return "group:" + group, strategy, true
+			}
+		}
 	}
-	group := commonRoutingGroup(auths)
-	if group == "" {
-		return "", "", false
+	if overrides := m.routingProviderStrategies(); len(overrides) > 0 {
+		providerKey := commonProviderKey(auths)
+		if providerKey != "" {
+			if strategy, ok := overrides[providerKey]; ok {
+				return "provider:" + providerKey, strategy, true
+			}
+		}
 	}
-	strategy, ok := overrides[group]
-	if !ok {
-		return "", "", false
-	}
-	return group, strategy, true
+	return "", "", false
 }
 
 func (m *Manager) selectorForStrategyGroup(group, strategy string) Selector {
@@ -3355,7 +3402,7 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	if m.hasRoutingGroupStrategies() {
+	if m.hasRoutingStrategyOverrides() {
 		return false
 	}
 	return isBuiltInSelector(m.selector)
