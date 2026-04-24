@@ -36,6 +36,7 @@ type SpreadSelector struct {
 	mu             sync.Mutex
 	cursors        map[string]int
 	currentWeights map[string]map[string]int
+	load           *spreadLoadTracker
 	maxKeys        int
 }
 
@@ -162,6 +163,12 @@ const (
 	healthBreakerThreshold   = 50
 	healthHalfOpenSuccesses  = 2
 	healthHalfOpenInterval   = 20 * time.Second
+
+	spreadLoadHalfLife          = 20 * time.Second
+	spreadLoadInflightWeight    = 4
+	spreadLoadOverTargetPower   = 3
+	spreadLoadDefaultKeyLimit   = 4096
+	spreadLoadInactiveRecordTTL = 10 * time.Minute
 )
 
 func healthStateKnown(state HealthState) bool {
@@ -244,6 +251,149 @@ func spreadSelectionWeight(auth *Auth, model string, now time.Time) int {
 		return 1
 	}
 	return weight
+}
+
+type spreadLoadRecord struct {
+	recentHits float64
+	inFlight   int
+	updatedAt  time.Time
+}
+
+type spreadLoadTracker struct {
+	records map[string]map[string]*spreadLoadRecord
+}
+
+func newSpreadLoadTracker() *spreadLoadTracker {
+	return &spreadLoadTracker{
+		records: make(map[string]map[string]*spreadLoadRecord),
+	}
+}
+
+func (t *spreadLoadTracker) ensureKey(key string, limit int) map[string]*spreadLoadRecord {
+	if t.records == nil {
+		t.records = make(map[string]map[string]*spreadLoadRecord)
+	}
+	if records := t.records[key]; records != nil {
+		return records
+	}
+	if limit <= 0 {
+		limit = spreadLoadDefaultKeyLimit
+	}
+	if len(t.records) >= limit {
+		t.records = make(map[string]map[string]*spreadLoadRecord)
+	}
+	records := make(map[string]*spreadLoadRecord)
+	t.records[key] = records
+	return records
+}
+
+func decaySpreadHits(record *spreadLoadRecord, now time.Time) {
+	if record == nil || record.updatedAt.IsZero() || !now.After(record.updatedAt) {
+		return
+	}
+	elapsed := now.Sub(record.updatedAt)
+	if elapsed <= 0 {
+		return
+	}
+	if spreadLoadHalfLife <= 0 {
+		record.recentHits = 0
+		record.updatedAt = now
+		return
+	}
+	record.recentHits *= math.Pow(0.5, float64(elapsed)/float64(spreadLoadHalfLife))
+	if record.recentHits < 0.01 {
+		record.recentHits = 0
+	}
+	record.updatedAt = now
+}
+
+func (t *spreadLoadTracker) snapshot(key string, authKeys []string, now time.Time, limit int) map[string]spreadLoadRecord {
+	records := t.ensureKey(key, limit)
+	active := make(map[string]struct{}, len(authKeys))
+	out := make(map[string]spreadLoadRecord, len(authKeys))
+	for _, authKey := range authKeys {
+		active[authKey] = struct{}{}
+		record := records[authKey]
+		if record == nil {
+			record = &spreadLoadRecord{updatedAt: now}
+			records[authKey] = record
+		}
+		decaySpreadHits(record, now)
+		out[authKey] = *record
+	}
+	for authKey, record := range records {
+		if _, ok := active[authKey]; ok {
+			continue
+		}
+		decaySpreadHits(record, now)
+		if record.inFlight <= 0 && record.recentHits == 0 && now.Sub(record.updatedAt) > spreadLoadInactiveRecordTTL {
+			delete(records, authKey)
+		}
+	}
+	return out
+}
+
+func (t *spreadLoadTracker) markPicked(key, authKey string, now time.Time, limit int) {
+	if authKey == "" {
+		return
+	}
+	record := t.ensureKey(key, limit)[authKey]
+	if record == nil {
+		record = &spreadLoadRecord{updatedAt: now}
+		t.records[key][authKey] = record
+	}
+	decaySpreadHits(record, now)
+	record.recentHits++
+	record.inFlight++
+	record.updatedAt = now
+}
+
+func (t *spreadLoadTracker) markDone(authID, model string, now time.Time) {
+	authID = strings.TrimSpace(authID)
+	modelKey := canonicalModelKey(model)
+	if authID == "" || modelKey == "" || t == nil || len(t.records) == 0 {
+		return
+	}
+	suffix := ":" + modelKey
+	for key, records := range t.records {
+		if !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		record := records[authID]
+		if record == nil {
+			continue
+		}
+		decaySpreadHits(record, now)
+		if record.inFlight > 0 {
+			record.inFlight--
+		}
+		record.updatedAt = now
+	}
+}
+
+func adjustedSpreadSelectionWeight(baseWeight int, authLoad, averageLoad float64) int {
+	if baseWeight < 1 {
+		baseWeight = 1
+	}
+	if authLoad <= 0 {
+		return baseWeight
+	}
+	if averageLoad < 1 {
+		averageLoad = 1
+	}
+	loadRatio := authLoad / averageLoad
+	if loadRatio <= 1 {
+		return baseWeight
+	}
+	penalty := math.Pow(loadRatio, spreadLoadOverTargetPower)
+	if penalty < 1 {
+		penalty = 1
+	}
+	adjusted := int(math.Ceil(float64(baseWeight) / penalty))
+	if adjusted < 1 {
+		return 1
+	}
+	return adjusted
 }
 
 func canonicalModelKey(model string) string {
@@ -565,17 +715,41 @@ func (s *SpreadSelector) pickWeightedLocked(key, model string, now time.Time, av
 	}
 
 	active := make(map[string]struct{}, len(available))
-	totalWeight := 0
-	var selected *Auth
-	selectedKey := ""
-	selectedScore := 0
+	authKeys := make([]string, 0, len(available))
+	authKeyByIndex := make([]string, len(available))
 	for i, auth := range available {
 		authKey := strings.TrimSpace(auth.ID)
 		if authKey == "" {
 			authKey = fmt.Sprintf("__index_%d", i)
 		}
+		authKeys = append(authKeys, authKey)
+		authKeyByIndex[i] = authKey
+	}
+	if s.load == nil {
+		s.load = newSpreadLoadTracker()
+	}
+	loadSnapshot := s.load.snapshot(key, authKeys, now, limit)
+	totalLoad := 0.0
+	for _, authKey := range authKeys {
+		record := loadSnapshot[authKey]
+		totalLoad += record.recentHits + float64(record.inFlight*spreadLoadInflightWeight)
+	}
+	averageLoad := 0.0
+	if len(authKeys) > 0 {
+		averageLoad = totalLoad / float64(len(authKeys))
+	}
+
+	totalWeight := 0
+	var selected *Auth
+	selectedKey := ""
+	selectedScore := 0
+	for i, auth := range available {
+		authKey := authKeyByIndex[i]
 		active[authKey] = struct{}{}
-		weight := spreadSelectionWeight(auth, model, now)
+		baseWeight := spreadSelectionWeight(auth, model, now)
+		record := loadSnapshot[authKey]
+		authLoad := record.recentHits + float64(record.inFlight*spreadLoadInflightWeight)
+		weight := adjustedSpreadSelectionWeight(baseWeight, authLoad, averageLoad)
 		totalWeight += weight
 		state[authKey] += weight
 		if selected == nil || state[authKey] > selectedScore {
@@ -591,8 +765,18 @@ func (s *SpreadSelector) pickWeightedLocked(key, model string, now time.Time, av
 	}
 	if selected != nil && totalWeight > 0 {
 		state[selectedKey] -= totalWeight
+		s.load.markPicked(key, selectedKey, now, limit)
 	}
 	return selected
+}
+
+func (s *SpreadSelector) MarkDone(authID, model string) {
+	if s == nil || s.load == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.load.markDone(authID, model, time.Now())
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.
@@ -930,6 +1114,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	s.cache.Set(cacheKey, auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+func (s *SessionAffinitySelector) MarkDone(authID, model string) {
+	if s == nil || s.fallback == nil {
+		return
+	}
+	if selector, ok := s.fallback.(loadAwareSelector); ok {
+		selector.MarkDone(authID, model)
+	}
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {

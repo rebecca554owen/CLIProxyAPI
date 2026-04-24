@@ -105,6 +105,10 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+type loadAwareSelector interface {
+	MarkDone(authID, model string)
+}
+
 // StoppableSelector is an optional interface for selectors that hold resources.
 // Selectors that implement this interface will have Stop called during shutdown.
 type StoppableSelector interface {
@@ -181,6 +185,9 @@ type Manager struct {
 	// sent for one auth/model combination.
 	halfOpenProbeMu   sync.Mutex
 	halfOpenProbeNext map[string]time.Time
+
+	codexModelLoadMu sync.Mutex
+	codexModelLoads  map[string]int
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -201,6 +208,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		modelPoolOffsets:  make(map[string]int),
 		dynamicSelectors:  make(map[string]Selector),
 		halfOpenProbeNext: make(map[string]time.Time),
+		codexModelLoads:   make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -1206,10 +1214,13 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, releaseSlot func()) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		if releaseSlot != nil {
+			defer releaseSlot()
+		}
 		var failed bool
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -1269,8 +1280,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		releaseSlot, errReserve := m.reserveCodexModelSlot(provider, resultModel)
+		if errReserve != nil {
+			m.markSelectorLoadDone(auth.ID, resultModel)
+			return nil, errReserve
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
+			releaseSlot()
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
@@ -1295,6 +1312,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
+				releaseSlot()
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
@@ -1306,6 +1324,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				releaseSlot()
 				return nil, bootstrapErr
 			}
 			if shouldEvictUnauthorizedError(bootstrapErr) {
@@ -1317,6 +1336,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				releaseSlot()
 				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			}
 			if idx < len(execModels)-1 {
@@ -1328,6 +1348,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				releaseSlot()
 				lastErr = bootstrapErr
 				continue
 			}
@@ -1339,6 +1360,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
+			releaseSlot()
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
@@ -1346,6 +1368,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
+			releaseSlot()
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
@@ -1359,7 +1382,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, releaseSlot), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1768,7 +1791,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			releaseSlot, errReserve := m.reserveCodexModelSlot(provider, resultModel)
+			if errReserve != nil {
+				m.markSelectorLoadDone(auth.ID, resultModel)
+				return cliproxyexecutor.Response{}, errReserve
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			releaseSlot()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1858,7 +1887,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			releaseSlot, errReserve := m.reserveCodexModelSlot(provider, resultModel)
+			if errReserve != nil {
+				m.markSelectorLoadDone(auth.ID, resultModel)
+				return cliproxyexecutor.Response{}, errReserve
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			releaseSlot()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2378,6 +2413,88 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func codexModelLoadKey(provider, model string) string {
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return ""
+	}
+	modelKey := canonicalModelKey(model)
+	if modelKey == "" {
+		return ""
+	}
+	return "codex:" + modelKey
+}
+
+func (m *Manager) codexModelConcurrencyLimit(model string) int {
+	if m == nil {
+		return 1
+	}
+	modelKey := canonicalModelKey(model)
+	if modelKey == "" {
+		return 1
+	}
+	now := time.Now()
+	limit := 0
+	registryRef := registry.GetGlobalRegistry()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || auth.Disabled {
+			continue
+		}
+		if !m.authSupportsRouteModel(registryRef, auth, modelKey) {
+			continue
+		}
+		checkModel := m.selectionModelForAuth(auth, modelKey)
+		blocked, _, _ := isAuthBlockedForModel(auth, checkModel, now)
+		if blocked {
+			continue
+		}
+		limit++
+	}
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
+
+func (m *Manager) reserveCodexModelSlot(provider, model string) (func(), error) {
+	key := codexModelLoadKey(provider, model)
+	if key == "" || m == nil {
+		return func() {}, nil
+	}
+	limit := m.codexModelConcurrencyLimit(model)
+	if limit < 1 {
+		limit = 1
+	}
+	m.codexModelLoadMu.Lock()
+	if m.codexModelLoads == nil {
+		m.codexModelLoads = make(map[string]int)
+	}
+	current := m.codexModelLoads[key]
+	if current >= limit {
+		m.codexModelLoadMu.Unlock()
+		return nil, &Error{
+			Code:       "model_concurrency_limited",
+			Message:    "Codex model " + canonicalModelKey(model) + " is at its concurrency limit",
+			Retryable:  true,
+			HTTPStatus: http.StatusTooManyRequests,
+		}
+	}
+	m.codexModelLoads[key] = current + 1
+	m.codexModelLoadMu.Unlock()
+
+	return func() {
+		m.codexModelLoadMu.Lock()
+		defer m.codexModelLoadMu.Unlock()
+		current := m.codexModelLoads[key]
+		if current <= 1 {
+			delete(m.codexModelLoads, key)
+			return
+		}
+		m.codexModelLoads[key] = current - 1
+	}, nil
+}
+
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
@@ -2545,6 +2662,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	m.markSelectorLoadDone(result.AuthID, result.Model)
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
@@ -2698,6 +2816,30 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func (m *Manager) markSelectorLoadDone(authID, model string) {
+	if m == nil || strings.TrimSpace(authID) == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	if selector, ok := m.selector.(loadAwareSelector); ok {
+		selector.MarkDone(authID, model)
+	}
+
+	m.dynamicSelectorsMu.Lock()
+	selectors := make([]Selector, 0, len(m.dynamicSelectors))
+	for _, selector := range m.dynamicSelectors {
+		if selector != nil {
+			selectors = append(selectors, selector)
+		}
+	}
+	m.dynamicSelectorsMu.Unlock()
+
+	for _, selector := range selectors {
+		if loadAware, ok := selector.(loadAwareSelector); ok {
+			loadAware.MarkDone(authID, model)
+		}
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

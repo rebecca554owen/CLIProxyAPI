@@ -129,6 +129,39 @@ func TestSpreadSelectorPick_LowersWeightForUnhealthyAuth(t *testing.T) {
 	}
 }
 
+func TestSpreadSelectorPick_LowersWeightForRecentlyHotAuth(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	selector := &SpreadSelector{load: newSpreadLoadTracker()}
+	model := "MiniMax-M2.5-highspeed"
+	key := "claude:" + canonicalModelKey(model)
+	for i := 0; i < 80; i++ {
+		selector.load.markPicked(key, "hot", now, spreadLoadDefaultKeyLimit)
+	}
+
+	auths := []*Auth{
+		{ID: "hot", Provider: "claude", Attributes: map[string]string{"priority": "20"}},
+		{ID: "cold-a", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+		{ID: "cold-b", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+	}
+
+	counts := make(map[string]int)
+	for i := 0; i < 45; i++ {
+		got, err := selector.Pick(context.Background(), "claude", model, cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+		selector.MarkDone(got.ID, model)
+	}
+
+	coldTotal := counts["cold-a"] + counts["cold-b"]
+	if coldTotal <= counts["hot"] {
+		t.Fatalf("SpreadSelector counts = %+v, want recent-load penalty to push traffic off the hot auth", counts)
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 
