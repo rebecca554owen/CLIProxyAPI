@@ -242,43 +242,82 @@ func (e *sequentialFillRetryProbeExecutor) ExecuteCalls() int {
 	return e.executeCalls
 }
 
-func TestManager_Execute_SequentialFillRetriesAfter429Cooldown(t *testing.T) {
+func TestManager_MarkResult_429StaysSoftBeforeRepeatedQuotaFailures(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
 
-	m := NewManager(nil, &SequentialFillSelector{}, nil)
-	m.SetRetryConfig(3, 30*time.Second, 3)
-
-	executor := &sequentialFillRetryProbeExecutor{id: "claude"}
-	m.RegisterExecutor(executor)
-
+	m := NewManager(nil, nil, nil)
 	auth := &Auth{
-		ID:       "sf-retry-auth",
+		ID:       "soft-quota-auth",
 		Provider: "claude",
 	}
 	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	model := "sf-retry-model"
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	model := "soft-quota-model"
+	result := Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+	}
 
-	start := time.Now()
-	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errExecute != nil {
-		t.Fatalf("execute error = %v, want success after retry", errExecute)
+	m.MarkResult(context.Background(), result)
+	updated, ok := m.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after first 429")
 	}
-	if string(resp.Payload) != "ok" {
-		t.Fatalf("payload = %q, want %q", string(resp.Payload), "ok")
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state not found after first 429")
 	}
-	if got := executor.ExecuteCalls(); got != 2 {
-		t.Fatalf("execute calls = %d, want %d", got, 2)
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("first 429 cooldown = %v, want zero", state.NextRetryAfter)
 	}
-	if waited := time.Since(start); waited < quotaBackoffBase {
-		t.Fatalf("retry wait = %v, want at least %v", waited, quotaBackoffBase)
+	if !state.Quota.Exceeded {
+		t.Fatal("first 429 should mark quota pressure")
+	}
+	if got := state.Health.ConsecutiveFailures; got != 1 {
+		t.Fatalf("first 429 consecutive failures = %d, want 1", got)
+	}
+
+	m.MarkResult(context.Background(), result)
+	updated, ok = m.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after second 429")
+	}
+	state = updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state not found after second 429")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("second 429 cooldown = %v, want zero", state.NextRetryAfter)
+	}
+	if got := state.Health.ConsecutiveFailures; got != 2 {
+		t.Fatalf("second 429 consecutive failures = %d, want 2", got)
+	}
+
+	before := time.Now()
+	m.MarkResult(context.Background(), result)
+	after := time.Now()
+	updated, ok = m.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after third 429")
+	}
+	state = updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state not found after third 429")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected third 429 to set hard cooldown")
+	}
+	minExpected := before.Add(85 * time.Second)
+	maxExpected := after.Add(95 * time.Second)
+	if state.NextRetryAfter.Before(minExpected) || state.NextRetryAfter.After(maxExpected) {
+		t.Fatalf("third 429 cooldown = %v, want within [%v, %v]", state.NextRetryAfter, minExpected, maxExpected)
 	}
 }
 

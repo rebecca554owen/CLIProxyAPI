@@ -66,6 +66,9 @@ const (
 	refreshFailureBackoff = 5 * time.Minute
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
+
+	quotaHardCooldownFailures        = health429OpenFailures
+	quotaImmediateCooldownRetryAfter = 5 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2890,7 +2893,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
-							if !disableCooling {
+							hardCooldown := !disableCooling && shouldHardCooldownQuota(state.Health, result.RetryAfter)
+							if hardCooldown {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
@@ -2900,6 +2904,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									}
 									backoffLevel = nextLevel
 								}
+								next = laterTime(next, state.Health.OpenUntil)
 							}
 							state.NextRetryAfter = next
 							state.Quota = QuotaState{
@@ -2908,7 +2913,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							}
-							if !disableCooling {
+							if hardCooldown {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
@@ -2918,9 +2923,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if isTransientUpstreamStatus(statusCode) {
 								if disableCooling {
 									state.NextRetryAfter = time.Time{}
-								} else {
-									next := now.Add(1 * time.Minute)
+								} else if next := transientHardCooldownUntil(state.Health); !next.IsZero() {
 									state.NextRetryAfter = next
+								} else {
+									state.NextRetryAfter = time.Time{}
 								}
 							} else {
 								state.NextRetryAfter = time.Time{}
@@ -3257,7 +3263,7 @@ func shouldOpenHealthCircuit(health HealthState, statusCode int) bool {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
 		return true
 	case http.StatusTooManyRequests:
-		return health.ConsecutiveFailures >= 2
+		return health.ConsecutiveFailures >= health429OpenFailures
 	}
 	if health.ConsecutiveFailures >= 3 {
 		return true
@@ -3265,16 +3271,43 @@ func shouldOpenHealthCircuit(health HealthState, statusCode int) bool {
 	return health.ConsecutiveFailures >= 2 && health.Score <= healthBreakerThreshold
 }
 
+func shouldHardCooldownQuota(health HealthState, retryAfter *time.Duration) bool {
+	if retryAfter != nil && *retryAfter >= quotaImmediateCooldownRetryAfter {
+		return true
+	}
+	if health.BreakerState == HealthBreakerOpen {
+		return true
+	}
+	return health.ConsecutiveFailures >= quotaHardCooldownFailures
+}
+
+func transientHardCooldownUntil(health HealthState) time.Time {
+	if health.BreakerState != HealthBreakerOpen {
+		return time.Time{}
+	}
+	return health.OpenUntil
+}
+
+func laterTime(a, b time.Time) time.Time {
+	if a.IsZero() {
+		return b
+	}
+	if b.IsZero() || a.After(b) {
+		return a
+	}
+	return b
+}
+
 func healthOpenCooldown(statusCode, consecutiveFailures int) time.Duration {
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
 		return 10 * time.Minute
 	case http.StatusTooManyRequests:
-		return time.Duration(minInt(10, consecutiveFailures)) * time.Minute
+		return time.Duration(minInt(4, consecutiveFailures)) * 30 * time.Second
 	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
-		return time.Duration(minInt(5, consecutiveFailures)) * time.Minute
+		return time.Duration(minInt(4, consecutiveFailures)) * 30 * time.Second
 	default:
-		return time.Duration(minInt(3, consecutiveFailures)) * time.Minute
+		return time.Duration(minInt(3, consecutiveFailures)) * 30 * time.Second
 	}
 }
 
@@ -3590,7 +3623,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		var next time.Time
-		if !disableCooling {
+		if !disableCooling && shouldHardCooldownQuota(auth.Health, retryAfter) {
 			if retryAfter != nil {
 				next = now.Add(*retryAfter)
 			} else {
@@ -3600,6 +3633,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				}
 				auth.Quota.BackoffLevel = nextLevel
 			}
+			next = laterTime(next, auth.Health.OpenUntil)
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
@@ -3608,8 +3642,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "transient upstream error"
 			if disableCooling {
 				auth.NextRetryAfter = time.Time{}
+			} else if next := transientHardCooldownUntil(auth.Health); !next.IsZero() {
+				auth.NextRetryAfter = next
 			} else {
-				auth.NextRetryAfter = now.Add(1 * time.Minute)
+				auth.NextRetryAfter = time.Time{}
 			}
 			return
 		}

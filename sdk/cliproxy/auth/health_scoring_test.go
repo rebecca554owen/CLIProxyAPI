@@ -147,8 +147,13 @@ func TestApplyHealthFailure_Repeated429OpensCircuit(t *testing.T) {
 	}
 
 	applyHealthFailure(&health, now.Add(30*time.Second), 429)
+	if health.BreakerState != HealthBreakerClosed {
+		t.Fatalf("after second 429 BreakerState = %q, want %q", health.BreakerState, HealthBreakerClosed)
+	}
+
+	applyHealthFailure(&health, now.Add(time.Minute), 429)
 	if health.BreakerState != HealthBreakerOpen {
-		t.Fatalf("after second 429 BreakerState = %q, want %q", health.BreakerState, HealthBreakerOpen)
+		t.Fatalf("after third 429 BreakerState = %q, want %q", health.BreakerState, HealthBreakerOpen)
 	}
 	if health.OpenUntil.IsZero() || !health.OpenUntil.After(now) {
 		t.Fatalf("OpenUntil = %v, want future time", health.OpenUntil)

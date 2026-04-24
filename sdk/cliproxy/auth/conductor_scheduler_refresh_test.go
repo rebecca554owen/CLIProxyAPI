@@ -119,13 +119,15 @@ func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T)
 		t.Fatalf("register old auth: %v", errRegister)
 	}
 
-	manager.MarkResult(ctx, Result{
-		AuthID:   oldAuth.ID,
-		Provider: "gemini",
-		Model:    "scheduler-cooldown-rebuild-model",
-		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
-	})
+	for range quotaHardCooldownFailures {
+		manager.MarkResult(ctx, Result{
+			AuthID:   oldAuth.ID,
+			Provider: "gemini",
+			Model:    "scheduler-cooldown-rebuild-model",
+			Success:  false,
+			Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+		})
+	}
 
 	newAuth := &Auth{
 		ID:       "cooldown-stale-new",
