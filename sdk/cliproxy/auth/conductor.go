@@ -651,6 +651,9 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 	if len(candidates) == 0 {
 		return nil
 	}
+	if isCodexAuth(auth) {
+		return append([]string(nil), candidates...)
+	}
 	now := time.Now()
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {
@@ -912,6 +915,9 @@ func (m *Manager) halfOpenProbeActive(authID, model string, now time.Time) bool 
 }
 
 func healthRequiresHalfOpenProbe(auth *Auth, model string, now time.Time) bool {
+	if isCodexAuth(auth) {
+		return false
+	}
 	state := resolveHealthState(auth, model)
 	switch state.BreakerState {
 	case HealthBreakerHalfOpen:
@@ -924,6 +930,9 @@ func healthRequiresHalfOpenProbe(auth *Auth, model string, now time.Time) bool {
 }
 
 func (m *Manager) healthSelectionBlocked(auth *Auth, model string, now time.Time) (bool, time.Time) {
+	if isCodexAuth(auth) {
+		return false, time.Time{}
+	}
 	state := resolveHealthState(auth, model)
 	switch state.BreakerState {
 	case HealthBreakerOpen:
@@ -2503,6 +2512,14 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	return result
 }
 
+func isCodexProviderName(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "codex")
+}
+
+func isCodexAuth(auth *Auth) bool {
+	return auth != nil && isCodexProviderName(auth.Provider)
+}
+
 func (m *Manager) retrySettings() (int, int, time.Duration) {
 	if m == nil {
 		return 0, 0, 0
@@ -2760,6 +2777,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		codexBypassCooling := isCodexAuth(auth)
 
 		if result.Success {
 			if result.Model != "" {
@@ -2780,7 +2798,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyHealthSuccess(&auth.Health, now)
 			}
 		} else {
-			if result.Model != "" {
+			if codexBypassCooling {
+				if result.Model != "" {
+					state := ensureModelState(auth, result.Model)
+					resetModelState(state, now)
+					state.Health = HealthState{}
+					updateAggregatedAvailability(auth, now)
+					auth.Health = HealthState{}
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					if auth.Status != StatusDisabled {
+						auth.Status = StatusActive
+					}
+					auth.UpdatedAt = now
+					shouldResumeModel = true
+					clearModelQuota = true
+				} else {
+					clearAuthStateOnSuccess(auth, now)
+				}
+			} else if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) && !isRequestScopedFeatureUnsupportedResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
@@ -3485,6 +3521,10 @@ func isRequestInvalidError(err error) bool {
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
+		return
+	}
+	if isCodexAuth(auth) {
+		clearAuthStateOnSuccess(auth, now)
 		return
 	}
 	if isRequestScopedNotFoundResultError(resultErr) || isRequestScopedFeatureUnsupportedResultError(resultErr) {

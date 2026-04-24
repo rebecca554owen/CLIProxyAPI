@@ -903,7 +903,7 @@ func TestManager_ModelSupportUnauthorized_FallsBackWithoutEvictingAuth(t *testin
 	}
 
 	got := executor.ExecuteCalls()
-	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	want := []string{badAuth.ID, goodAuth.ID, badAuth.ID, goodAuth.ID}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
@@ -921,14 +921,14 @@ func TestManager_ModelSupportUnauthorized_FallsBackWithoutEvictingAuth(t *testin
 	if state == nil {
 		t.Fatalf("expected model state for %q", model)
 	}
-	if state.Status != StatusDisabled {
-		t.Fatalf("expected bad auth model state status %q, got %q", StatusDisabled, state.Status)
+	if state.Status != StatusActive {
+		t.Fatalf("expected codex bad auth model state status %q, got %q", StatusActive, state.Status)
 	}
-	if !state.Unavailable {
-		t.Fatalf("expected bad auth model state to be unavailable")
+	if state.Unavailable {
+		t.Fatalf("expected codex bad auth model state to stay available")
 	}
-	if state.NextRetryAfter.IsZero() {
-		t.Fatalf("expected bad auth model state cooldown to be set")
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected codex bad auth model cooldown to stay empty, got %v", state.NextRetryAfter)
 	}
 }
 

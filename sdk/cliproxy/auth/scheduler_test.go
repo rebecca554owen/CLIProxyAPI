@@ -187,6 +187,48 @@ func TestSchedulerPick_SkipsAuthLevelCooldownForModelRequests(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_CodexIgnoresLocalCooling(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.5"
+	now := time.Now()
+	registerSchedulerModels(t, "codex", model, "codex-cooling", "codex-ready")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:             "codex-cooling",
+			Provider:       "codex",
+			Unavailable:    true,
+			NextRetryAfter: now.Add(30 * time.Minute),
+			Quota:          QuotaState{Exceeded: true, NextRecoverAt: now.Add(30 * time.Minute)},
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(30 * time.Minute),
+					Quota:          QuotaState{Exceeded: true, NextRecoverAt: now.Add(30 * time.Minute)},
+					Health:         HealthState{Observed: true, Score: 10, BreakerState: HealthBreakerOpen, OpenUntil: now.Add(30 * time.Minute)},
+				},
+			},
+		},
+		&Auth{
+			ID:       "codex-ready",
+			Provider: "codex",
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "codex-cooling" {
+		t.Fatalf("pickSingle() auth.ID = %q, want codex-cooling", got.ID)
+	}
+}
+
 func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
 	t.Parallel()
 

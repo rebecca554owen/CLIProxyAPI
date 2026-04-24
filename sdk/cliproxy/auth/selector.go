@@ -942,6 +942,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	if isCodexAuth(auth) {
+		return false, blockReasonNone, time.Time{}
+	}
 	authBlocked, authReason, authNext := authLevelBlockState(auth, now)
 	if model != "" {
 		if len(auth.ModelStates) > 0 {

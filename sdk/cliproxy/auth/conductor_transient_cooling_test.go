@@ -10,7 +10,7 @@ func TestManager_MarkResult_524SetsModelCooldown(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, nil, nil)
-	auth := &Auth{ID: "auth-524", Provider: "codex"}
+	auth := &Auth{ID: "auth-524", Provider: "claude"}
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestManager_MarkResult_524SetsModelCooldown(t *testing.T) {
 	manager.MarkResult(context.Background(), Result{
 		AuthID:   auth.ID,
 		Provider: auth.Provider,
-		Model:    "gpt-5.4",
+		Model:    "claude-sonnet-4-6",
 		Success:  false,
 		Error:    &Error{HTTPStatus: 524, Message: "gateway timeout"},
 	})
@@ -31,9 +31,9 @@ func TestManager_MarkResult_524SetsModelCooldown(t *testing.T) {
 	if updated == nil {
 		t.Fatal("expected registered auth to remain present")
 	}
-	state := updated.ModelStates["gpt-5.4"]
+	state := updated.ModelStates["claude-sonnet-4-6"]
 	if state == nil {
-		t.Fatal("expected model state for gpt-5.4")
+		t.Fatal("expected model state for claude-sonnet-4-6")
 	}
 	if state.NextRetryAfter.IsZero() {
 		t.Fatal("expected 524 to set model cooldown")
@@ -48,7 +48,7 @@ func TestManager_MarkResult_524SetsModelCooldown(t *testing.T) {
 func TestApplyAuthFailureState_524SetsAuthCooldown(t *testing.T) {
 	t.Parallel()
 
-	auth := &Auth{ID: "auth-524", Provider: "codex"}
+	auth := &Auth{ID: "auth-524", Provider: "claude"}
 	before := time.Now()
 	applyAuthFailureState(auth, &Error{HTTPStatus: 524, Message: "gateway timeout"}, nil, before)
 

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -247,11 +248,11 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 	t.Parallel()
 
 	now := time.Now()
-	const model = "gpt-5.5"
+	const model = "claude-sonnet-4-6"
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	authA := &Auth{
 		ID:         "a",
-		Provider:   "codex",
+		Provider:   "claude",
 		Attributes: map[string]string{"priority": "10"},
 		ModelStates: map[string]*ModelState{
 			model: {
@@ -264,7 +265,7 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 	}
 	authB := &Auth{
 		ID:         "b",
-		Provider:   "codex",
+		Provider:   "claude",
 		Attributes: map[string]string{"priority": "10"},
 		ModelStates: map[string]*ModelState{
 			model: {
@@ -276,7 +277,7 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 		},
 	}
 
-	available, err := manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "codex", model, now)
+	available, err := manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now)
 	if err != nil {
 		t.Fatalf("availableAuthsForRouteModel(first probe) error = %v", err)
 	}
@@ -288,7 +289,7 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 		t.Fatalf("filterExecutionModels(first probe) = %+v, want fallback probe model", models)
 	}
 
-	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "codex", model, now.Add(time.Second))
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("availableAuthsForRouteModel(second probe) error = %v", err)
 	}
@@ -296,9 +297,110 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 		t.Fatalf("availableAuthsForRouteModel(second probe) = %+v, want auth b", available)
 	}
 
-	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "codex", model, now.Add(2*time.Second))
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(2*time.Second))
 	if err == nil {
 		t.Fatalf("availableAuthsForRouteModel(third probe) = %+v, want cooldown error after probe budget is used", available)
+	}
+}
+
+func TestManagerAvailableAuthsForRouteModel_CodexIgnoresLocalCooling(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	authA := &Auth{
+		ID:         "a",
+		Provider:   "codex",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+				Health: HealthState{
+					Observed:     true,
+					Score:        10,
+					BreakerState: HealthBreakerOpen,
+					OpenUntil:    now.Add(30 * time.Minute),
+				},
+			},
+		},
+	}
+	authB := &Auth{
+		ID:             "b",
+		Provider:       "codex",
+		Attributes:     map[string]string{"priority": "10"},
+		Unavailable:    true,
+		NextRetryAfter: now.Add(30 * time.Minute),
+		Quota:          QuotaState{Exceeded: true},
+		Health:         HealthState{Observed: true, Score: 10, BreakerState: HealthBreakerOpen, OpenUntil: now.Add(30 * time.Minute)},
+	}
+	disabled := &Auth{ID: "disabled", Provider: "codex", Disabled: true}
+
+	available, err := manager.availableAuthsForRouteModel([]*Auth{authA, authB, disabled}, "codex", model, now)
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel() error = %v", err)
+	}
+	if len(available) != 2 {
+		t.Fatalf("availableAuthsForRouteModel() len = %d, want 2 codex auths despite local cooling", len(available))
+	}
+	if available[0].ID != "a" || available[1].ID != "b" {
+		t.Fatalf("availableAuthsForRouteModel() ids = [%s %s], want [a b]", available[0].ID, available[1].ID)
+	}
+
+	models := manager.filterExecutionModels(authA, model, []string{model}, false)
+	if len(models) != 1 || models[0] != model {
+		t.Fatalf("filterExecutionModels() = %+v, want codex model despite local cooling", models)
+	}
+}
+
+func TestManagerMarkResult_CodexFailureDoesNotCooldown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.auths["codex-a"] = &Auth{
+		ID:             "codex-a",
+		Provider:       "codex",
+		Status:         StatusActive,
+		Unavailable:    true,
+		NextRetryAfter: now.Add(30 * time.Minute),
+		Quota:          QuotaState{Exceeded: true, NextRecoverAt: now.Add(30 * time.Minute), BackoffLevel: 2},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true, NextRecoverAt: now.Add(30 * time.Minute), BackoffLevel: 2},
+				Health:         HealthState{Observed: true, Score: 10, BreakerState: HealthBreakerOpen, OpenUntil: now.Add(30 * time.Minute)},
+			},
+		},
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "codex-a",
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "upstream rate limited"},
+	})
+
+	updated := manager.auths["codex-a"]
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() || updated.Quota.Exceeded {
+		t.Fatalf("codex auth cooling = unavailable:%v next:%v quota:%+v, want clear", updated.Unavailable, updated.NextRetryAfter, updated.Quota)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("codex model state missing")
+	}
+	if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || state.Status != StatusActive {
+		t.Fatalf("codex model cooling = status:%s unavailable:%v next:%v quota:%+v, want active and clear", state.Status, state.Unavailable, state.NextRetryAfter, state.Quota)
+	}
+	if state.Health.BreakerState != "" || state.Health.Observed {
+		t.Fatalf("codex model health = %+v, want clear", state.Health)
 	}
 }
 
