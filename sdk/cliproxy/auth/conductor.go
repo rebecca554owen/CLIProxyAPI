@@ -2462,25 +2462,13 @@ func (m *Manager) reserveCodexModelSlot(provider, model string) (func(), error) 
 	if key == "" || m == nil {
 		return func() {}, nil
 	}
-	limit := m.codexModelConcurrencyLimit(model)
-	if limit < 1 {
-		limit = 1
-	}
 	m.codexModelLoadMu.Lock()
 	if m.codexModelLoads == nil {
 		m.codexModelLoads = make(map[string]int)
 	}
-	current := m.codexModelLoads[key]
-	if current >= limit {
-		m.codexModelLoadMu.Unlock()
-		return nil, &Error{
-			Code:       "model_concurrency_limited",
-			Message:    "Codex model " + canonicalModelKey(model) + " is at its concurrency limit",
-			Retryable:  true,
-			HTTPStatus: http.StatusTooManyRequests,
-		}
-	}
-	m.codexModelLoads[key] = current + 1
+	// Track Codex model pressure without rejecting requests. Hard model-level
+	// 429s are too disruptive for long-running streaming workloads.
+	m.codexModelLoads[key]++
 	m.codexModelLoadMu.Unlock()
 
 	return func() {

@@ -1,8 +1,6 @@
 package auth
 
 import (
-	"errors"
-	"net/http"
 	"testing"
 	"time"
 
@@ -245,7 +243,7 @@ func TestManagerReserveHalfOpenProbe_AllowsSingleProbePerInterval(t *testing.T) 
 	}
 }
 
-func TestManagerReserveCodexModelSlot_IsolatesModels(t *testing.T) {
+func TestManagerReserveCodexModelSlot_DoesNotHardLimitModels(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -257,23 +255,17 @@ func TestManagerReserveCodexModelSlot_IsolatesModels(t *testing.T) {
 	}
 	defer releaseGPT54()
 
-	_, err = manager.reserveCodexModelSlot("codex", "gpt-5.4")
-	if err == nil {
-		t.Fatal("second reserveCodexModelSlot(gpt-5.4) error = nil, want concurrency limit")
+	releaseGPT54Second, err := manager.reserveCodexModelSlot("codex", "gpt-5.4")
+	if err != nil {
+		t.Fatalf("second reserveCodexModelSlot(gpt-5.4) error = %v, want soft tracking only", err)
 	}
-	var limitErr *Error
-	if !errors.As(err, &limitErr) {
-		t.Fatalf("second reserveCodexModelSlot(gpt-5.4) error = %T, want *Error", err)
-	}
-	if limitErr.HTTPStatus != http.StatusTooManyRequests {
-		t.Fatalf("limit HTTPStatus = %d, want %d", limitErr.HTTPStatus, http.StatusTooManyRequests)
-	}
+	defer releaseGPT54Second()
 
 	releaseGPT55, err := manager.reserveCodexModelSlot("codex", "gpt-5.5")
 	if err != nil {
 		t.Fatalf("reserveCodexModelSlot(gpt-5.5) error = %v, want isolated model slot", err)
 	}
-	releaseGPT55()
+	defer releaseGPT55()
 }
 
 func TestApplyHealthSuccess_HalfOpenNeedsTwoSuccessesToClose(t *testing.T) {
