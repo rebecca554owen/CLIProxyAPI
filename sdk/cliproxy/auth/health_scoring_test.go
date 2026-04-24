@@ -293,13 +293,29 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 	if err != nil {
 		t.Fatalf("availableAuthsForRouteModel(second probe) error = %v", err)
 	}
-	if len(available) != 1 || available[0].ID != "b" {
-		t.Fatalf("availableAuthsForRouteModel(second probe) = %+v, want auth b", available)
+	if len(available) != 2 || available[0].ID != "a" || available[1].ID != "b" {
+		t.Fatalf("availableAuthsForRouteModel(second probe) = %+v, want active auth a and new probe auth b", available)
 	}
 
 	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel(active probe window) error = %v", err)
+	}
+	if len(available) != 2 || available[0].ID != "a" || available[1].ID != "b" {
+		t.Fatalf("availableAuthsForRouteModel(active probe window) = %+v, want both active probes", available)
+	}
+
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(healthHalfOpenActiveTTL+time.Second))
 	if err == nil {
-		t.Fatalf("availableAuthsForRouteModel(third probe) = %+v, want cooldown error after probe budget is used", available)
+		t.Fatalf("availableAuthsForRouteModel(after active probe window) = %+v, want cooldown error before next probe interval", available)
+	}
+
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(healthHalfOpenInterval+time.Second))
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel(next probe interval) error = %v", err)
+	}
+	if len(available) != 1 || available[0].ID != "a" {
+		t.Fatalf("availableAuthsForRouteModel(next probe interval) = %+v, want auth a", available)
 	}
 }
 

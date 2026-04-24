@@ -684,8 +684,14 @@ func TestStructuredOutputAndToolsSchemasAreCleaned(t *testing.T) {
 	if gjson.Get(result, "text.format.schema.properties.rewardTitleEffects.items.oneOf").Exists() {
 		t.Fatalf("response schema oneOf should be removed: %s", result)
 	}
+	if got := gjson.Get(result, "text.format.schema.additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("response schema additionalProperties should be false: %s", result)
+	}
 	if got := gjson.Get(result, "tools.0.parameters.properties.sessions.items.type").String(); got == "" {
 		t.Fatalf("tool array items should be normalized: %s", result)
+	}
+	if got := gjson.Get(result, "tools.0.parameters.additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("tool parameters additionalProperties should be false: %s", result)
 	}
 	if gjson.Get(result, "tools.0.parameters.required").Exists() {
 		t.Fatalf("tool required should be removed when null: %s", result)

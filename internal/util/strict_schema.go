@@ -7,7 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const strictObjectJSONSchema = `{"type":"object","properties":{}}`
+const strictObjectJSONSchema = `{"type":"object","properties":{},"additionalProperties":false}`
 
 func CleanJSONSchemaForStrictUpstream(jsonStr string) string {
 	jsonStr = strings.TrimSpace(jsonStr)
@@ -37,6 +37,7 @@ func CleanJSONSchemaForStrictUpstream(jsonStr string) string {
 		if _, ok := root["properties"].(map[string]any); !ok {
 			root["properties"] = map[string]any{}
 		}
+		root["additionalProperties"] = false
 	}
 	if req := normalizeStringArray(root["required"]); len(req) > 0 {
 		root["required"] = req
@@ -88,6 +89,12 @@ func normalizeStrictSchemaNode(node any) any {
 
 		schemaType, _ := normalized["type"].(string)
 		schemaType = strings.TrimSpace(schemaType)
+		if schemaType == "" {
+			if _, hasProperties := normalized["properties"]; hasProperties {
+				normalized["type"] = "object"
+				schemaType = "object"
+			}
+		}
 		if schemaType == "array" {
 			if _, ok := normalized["items"]; !ok {
 				normalized["items"] = map[string]any{"type": "string"}
@@ -97,6 +104,7 @@ func normalizeStrictSchemaNode(node any) any {
 			if _, ok := normalized["properties"].(map[string]any); !ok {
 				normalized["properties"] = map[string]any{}
 			}
+			normalized["additionalProperties"] = false
 		}
 		return normalized
 	case []any:

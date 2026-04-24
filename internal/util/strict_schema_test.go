@@ -31,6 +31,14 @@ func TestCleanJSONSchemaForStrictUpstream_StripsOneOfAndNormalizesArrayItems(t *
 	if got := gjson.Get(result, "properties.rewardTitleEffects.items.type").String(); got == "" {
 		t.Fatalf("items.type should be normalized: %s", result)
 	}
+	if got := gjson.Get(result, "additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("root additionalProperties should be false: %s", result)
+	}
+	if got := gjson.Get(result, "properties.rewardTitleEffects.items.properties.title").Exists(); got {
+		if nested := gjson.Get(result, "properties.rewardTitleEffects.items.additionalProperties"); !nested.Exists() || nested.Bool() {
+			t.Fatalf("nested object additionalProperties should be false: %s", result)
+		}
+	}
 }
 
 func TestCleanJSONSchemaForStrictUpstream_NormalizesNullArrayBits(t *testing.T) {
@@ -69,5 +77,32 @@ func TestCleanJSONSchemaForStrictUpstream_EmptyFallsBackToObject(t *testing.T) {
 	}
 	if !gjson.Get(result, "properties").IsObject() {
 		t.Fatalf("expected object fallback properties: %s", result)
+	}
+	if got := gjson.Get(result, "additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("expected object fallback additionalProperties=false: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForStrictUpstream_AddsAdditionalPropertiesFalseRecursively(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"caption": {"type": "string"},
+			"metadata": {
+				"type": "object",
+				"properties": {
+					"source": {"type": "string"}
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForStrictUpstream(input)
+
+	if got := gjson.Get(result, "additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("root additionalProperties should be false: %s", result)
+	}
+	if got := gjson.Get(result, "properties.metadata.additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("nested additionalProperties should be false: %s", result)
 	}
 }

@@ -696,7 +696,16 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	availableByPriority := make(map[int][]*Auth)
 	fallbackCandidates := make([]cooldownFallbackCandidate, 0, len(auths))
 	cooldownCount := 0
+	activeFallbackAvailable := false
 	var earliest time.Time
+	recordAvailable := func(candidate *Auth, checkModel string) {
+		availableAll = append(availableAll, candidate)
+		if spreadAcrossPriorities {
+			return
+		}
+		priority := effectiveSelectionPriority(candidate, checkModel, now)
+		availableByPriority[priority] = append(availableByPriority[priority], candidate)
+	}
 	recordTemporalBlock := func(candidate *Auth, checkModel string, next time.Time) {
 		cooldownCount++
 		if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
@@ -713,21 +722,32 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
+			if m.halfOpenProbeActive(candidate.ID, checkModel, now) {
+				activeFallbackAvailable = true
+				recordAvailable(candidate, checkModel)
+				continue
+			}
 			healthBlocked, healthNext := m.healthSelectionBlocked(candidate, checkModel, now)
 			if healthBlocked {
 				recordTemporalBlock(candidate, checkModel, healthNext)
 				continue
 			}
-			availableAll = append(availableAll, candidate)
-			if spreadAcrossPriorities {
-				continue
-			}
-			priority := effectiveSelectionPriority(candidate, checkModel, now)
-			availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			recordAvailable(candidate, checkModel)
 			continue
 		}
 		if (reason == blockReasonCooldown || reason == blockReasonOther) && !next.IsZero() {
+			if m.halfOpenProbeActive(candidate.ID, checkModel, now) {
+				activeFallbackAvailable = true
+				recordAvailable(candidate, checkModel)
+				continue
+			}
 			recordTemporalBlock(candidate, checkModel, next)
+		}
+	}
+
+	if activeFallbackAvailable && len(fallbackCandidates) > 0 {
+		if fallback, _ := m.cooldownFallbackProbe(fallbackCandidates, now); fallback != nil {
+			recordAvailable(fallback.auth, fallback.model)
 		}
 	}
 
@@ -735,7 +755,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		if len(availableAll) == 0 {
 			if cooldownCount == len(auths) && !earliest.IsZero() {
 				if fallback, probeNext := m.cooldownFallbackProbe(fallbackCandidates, now); fallback != nil {
-					return []*Auth{fallback}, nil
+					return []*Auth{fallback.auth}, nil
 				} else if !probeNext.IsZero() && probeNext.Before(earliest) {
 					earliest = probeNext
 				}
@@ -760,7 +780,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			if fallback, probeNext := m.cooldownFallbackProbe(fallbackCandidates, now); fallback != nil {
-				return []*Auth{fallback}, nil
+				return []*Auth{fallback.auth}, nil
 			} else if !probeNext.IsZero() && probeNext.Before(earliest) {
 				earliest = probeNext
 			}
@@ -793,7 +813,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
-func (m *Manager) cooldownFallbackProbe(candidates []cooldownFallbackCandidate, now time.Time) (*Auth, time.Time) {
+func (m *Manager) cooldownFallbackProbe(candidates []cooldownFallbackCandidate, now time.Time) (*cooldownFallbackCandidate, time.Time) {
 	if len(candidates) == 0 {
 		return nil, time.Time{}
 	}
@@ -825,7 +845,8 @@ func (m *Manager) cooldownFallbackProbe(candidates []cooldownFallbackCandidate, 
 		}
 		ok, next := m.reserveHalfOpenProbe(candidate.auth.ID, candidate.model, now)
 		if ok {
-			return candidate.auth, time.Time{}
+			fallback := candidate
+			return &fallback, time.Time{}
 		}
 		if !next.IsZero() && (probeNext.IsZero() || next.Before(probeNext)) {
 			probeNext = next
@@ -3911,6 +3932,11 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 		m.syncScheduler()
 		selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		if errPick != nil {
+			if fallbackAuth, fallbackExecutor, errFallback := m.pickNextLegacy(ctx, provider, model, opts, tried); errFallback == nil {
+				return fallbackAuth, fallbackExecutor, nil
+			}
+		}
 	}
 	if errPick != nil {
 		return nil, nil, errPick
@@ -4112,6 +4138,11 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 		m.syncScheduler()
 		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		if errPick != nil {
+			if fallbackAuth, fallbackExecutor, fallbackProvider, errFallback := m.pickNextMixedLegacy(ctx, providers, model, opts, tried); errFallback == nil {
+				return fallbackAuth, fallbackExecutor, fallbackProvider, nil
+			}
+		}
 	}
 	if errPick != nil {
 		return nil, nil, "", errPick
