@@ -1897,6 +1897,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			m.logAuthSelectionFailureMetric(ctx, providers, routeModel, errPick)
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1905,6 +1906,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		m.logAuthSelectionMetric(ctx, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1994,6 +1996,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			m.logAuthSelectionFailureMetric(ctx, providers, routeModel, errPick)
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2002,6 +2005,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		m.logAuthSelectionMetric(ctx, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -2095,6 +2099,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			m.logAuthSelectionFailureMetric(ctx, providers, routeModel, errPick)
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -2107,6 +2112,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		m.logAuthSelectionMetric(ctx, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -2980,6 +2986,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
 
+	if authSnapshot != nil {
+		m.logAuthResultMetric(ctx, authSnapshot, result)
+	}
 	m.hook.OnResult(ctx, result)
 }
 
@@ -4682,6 +4691,132 @@ func logEntryWithRequestID(ctx context.Context) *log.Entry {
 		return log.WithField("request_id", reqID)
 	}
 	return log.NewEntry(log.StandardLogger())
+}
+
+func authMetricIndex(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if index := strings.TrimSpace(auth.Index); index != "" {
+		return index
+	}
+	return auth.EnsureIndex()
+}
+
+func selectorMetricStrategy(selector Selector) string {
+	switch s := selector.(type) {
+	case *RoundRobinSelector:
+		return RoutingStrategyRoundRobin
+	case *FillFirstSelector:
+		return RoutingStrategyFillFirst
+	case *SequentialFillSelector:
+		return RoutingStrategySequentialFill
+	case *SpreadSelector:
+		return RoutingStrategySpread
+	case *SessionAffinitySelector:
+		fallback := selectorMetricStrategy(s.fallback)
+		if fallback == "" {
+			return "session-affinity"
+		}
+		return "session-affinity+" + fallback
+	default:
+		return "custom"
+	}
+}
+
+func (m *Manager) authMetricRouting(auth *Auth) (string, string) {
+	if m == nil {
+		return "default", ""
+	}
+	if group, strategy, ok := m.routingStrategyForAuths([]*Auth{auth}); ok {
+		return group, strategy
+	}
+	return "default", selectorMetricStrategy(m.selector)
+}
+
+func (m *Manager) authMetricFields(auth *Auth, provider, model string) log.Fields {
+	fields := log.Fields{
+		"provider": provider,
+		"model":    canonicalModelKey(model),
+	}
+	if auth == nil {
+		return fields
+	}
+	fields["auth_index"] = authMetricIndex(auth)
+	if group := authRoutingGroup(auth); group != "" {
+		fields["routing_group"] = group
+	}
+	scope, strategy := m.authMetricRouting(auth)
+	if scope != "" {
+		fields["routing_scope"] = scope
+	}
+	if strategy != "" {
+		fields["routing_strategy"] = strategy
+	}
+	return fields
+}
+
+func (m *Manager) logAuthSelectionMetric(ctx context.Context, auth *Auth, provider, model string) {
+	if auth == nil {
+		return
+	}
+	fields := m.authMetricFields(auth, provider, model)
+	fields["event"] = "auth_selection"
+	logEntryWithRequestID(ctx).WithFields(fields).Info("auth_selection")
+}
+
+func (m *Manager) logAuthSelectionFailureMetric(ctx context.Context, providers []string, model string, err error) {
+	if err == nil {
+		return
+	}
+	fields := log.Fields{
+		"event":     "auth_selection_failed",
+		"providers": strings.Join(normalizeProviderKeys(providers), ","),
+		"model":     canonicalModelKey(model),
+	}
+	if status := statusCodeFromError(err); status > 0 {
+		fields["status"] = status
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		if authErr.Code != "" {
+			fields["error_code"] = authErr.Code
+		}
+		if authErr.Retryable {
+			fields["retryable"] = true
+		}
+	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) && cooldownErr != nil {
+		fields["error_code"] = "model_cooldown"
+		fields["reset_ms"] = cooldownErr.resetIn.Milliseconds()
+	}
+	logEntryWithRequestID(ctx).WithFields(fields).Warn("auth_selection_failed")
+}
+
+func (m *Manager) logAuthResultMetric(ctx context.Context, auth *Auth, result Result) {
+	fields := m.authMetricFields(auth, result.Provider, result.Model)
+	fields["event"] = "auth_result"
+	fields["success"] = result.Success
+	status := statusCodeFromResult(result.Error)
+	if result.Success && status == 0 {
+		status = http.StatusOK
+	}
+	if status > 0 {
+		fields["status"] = status
+	}
+	if result.Error != nil {
+		if result.Error.Code != "" {
+			fields["error_code"] = result.Error.Code
+		}
+		if result.Error.Retryable {
+			fields["retryable"] = true
+		}
+	}
+	if result.RetryAfter != nil {
+		fields["retry_after_ms"] = result.RetryAfter.Milliseconds()
+	}
+	logEntryWithRequestID(ctx).WithFields(fields).Info("auth_result")
 }
 
 func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model string) {
