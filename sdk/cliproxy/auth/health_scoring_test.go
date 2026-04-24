@@ -243,6 +243,65 @@ func TestManagerReserveHalfOpenProbe_AllowsSingleProbePerInterval(t *testing.T) 
 	}
 }
 
+func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	authA := &Auth{
+		ID:         "a",
+		Provider:   "codex",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(2 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+	authB := &Auth{
+		ID:         "b",
+		Provider:   "codex",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(3 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+
+	available, err := manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "codex", model, now)
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel(first probe) error = %v", err)
+	}
+	if len(available) != 1 || available[0].ID != "a" {
+		t.Fatalf("availableAuthsForRouteModel(first probe) = %+v, want auth a", available)
+	}
+	models := manager.filterExecutionModels(available[0], model, []string{model}, false)
+	if len(models) != 1 || models[0] != model {
+		t.Fatalf("filterExecutionModels(first probe) = %+v, want fallback probe model", models)
+	}
+
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "codex", model, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel(second probe) error = %v", err)
+	}
+	if len(available) != 1 || available[0].ID != "b" {
+		t.Fatalf("availableAuthsForRouteModel(second probe) = %+v, want auth b", available)
+	}
+
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "codex", model, now.Add(2*time.Second))
+	if err == nil {
+		t.Fatalf("availableAuthsForRouteModel(third probe) = %+v, want cooldown error after probe budget is used", available)
+	}
+}
+
 func TestManagerReserveCodexModelSlot_DoesNotHardLimitModels(t *testing.T) {
 	t.Parallel()
 

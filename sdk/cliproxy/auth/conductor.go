@@ -183,8 +183,9 @@ type Manager struct {
 
 	// halfOpenProbeNext tracks the earliest time another half-open probe may be
 	// sent for one auth/model combination.
-	halfOpenProbeMu   sync.Mutex
-	halfOpenProbeNext map[string]time.Time
+	halfOpenProbeMu          sync.Mutex
+	halfOpenProbeNext        map[string]time.Time
+	halfOpenProbeActiveUntil map[string]time.Time
 
 	codexModelLoadMu sync.Mutex
 	codexModelLoads  map[string]int
@@ -199,16 +200,17 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:             store,
-		executors:         make(map[string]ProviderExecutor),
-		selector:          selector,
-		hook:              hook,
-		auths:             make(map[string]*Auth),
-		providerOffsets:   make(map[string]int),
-		modelPoolOffsets:  make(map[string]int),
-		dynamicSelectors:  make(map[string]Selector),
-		halfOpenProbeNext: make(map[string]time.Time),
-		codexModelLoads:   make(map[string]int),
+		store:                    store,
+		executors:                make(map[string]ProviderExecutor),
+		selector:                 selector,
+		hook:                     hook,
+		auths:                    make(map[string]*Auth),
+		providerOffsets:          make(map[string]int),
+		modelPoolOffsets:         make(map[string]int),
+		dynamicSelectors:         make(map[string]Selector),
+		halfOpenProbeNext:        make(map[string]time.Time),
+		halfOpenProbeActiveUntil: make(map[string]time.Time),
+		codexModelLoads:          make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -654,12 +656,20 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 	for _, upstreamModel := range candidates {
 		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 		blocked, _, _ := isAuthBlockedForModel(auth, stateModel, now)
-		if blocked {
+		probeActive := auth != nil && m.halfOpenProbeActive(auth.ID, stateModel, now)
+		if blocked && !probeActive {
 			continue
 		}
 		out = append(out, upstreamModel)
 	}
 	return out
+}
+
+type cooldownFallbackCandidate struct {
+	auth     *Auth
+	model    string
+	next     time.Time
+	priority int
 }
 
 func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
@@ -681,18 +691,28 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	spreadAcrossPriorities := selectorUsesSpread(m.selectorForAuths(auths))
 	availableAll := make([]*Auth, 0, len(auths))
 	availableByPriority := make(map[int][]*Auth)
+	fallbackCandidates := make([]cooldownFallbackCandidate, 0, len(auths))
 	cooldownCount := 0
 	var earliest time.Time
+	recordTemporalBlock := func(candidate *Auth, checkModel string, next time.Time) {
+		cooldownCount++
+		if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
+			earliest = next
+		}
+		fallbackCandidates = append(fallbackCandidates, cooldownFallbackCandidate{
+			auth:     candidate,
+			model:    checkModel,
+			next:     next,
+			priority: effectiveSelectionPriority(candidate, checkModel, now),
+		})
+	}
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
 			healthBlocked, healthNext := m.healthSelectionBlocked(candidate, checkModel, now)
 			if healthBlocked {
-				cooldownCount++
-				if !healthNext.IsZero() && (earliest.IsZero() || healthNext.Before(earliest)) {
-					earliest = healthNext
-				}
+				recordTemporalBlock(candidate, checkModel, healthNext)
 				continue
 			}
 			availableAll = append(availableAll, candidate)
@@ -703,17 +723,19 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
 		}
-		if reason == blockReasonCooldown {
-			cooldownCount++
-			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
-				earliest = next
-			}
+		if (reason == blockReasonCooldown || reason == blockReasonOther) && !next.IsZero() {
+			recordTemporalBlock(candidate, checkModel, next)
 		}
 	}
 
 	if spreadAcrossPriorities {
 		if len(availableAll) == 0 {
 			if cooldownCount == len(auths) && !earliest.IsZero() {
+				if fallback, probeNext := m.cooldownFallbackProbe(fallbackCandidates, now); fallback != nil {
+					return []*Auth{fallback}, nil
+				} else if !probeNext.IsZero() && probeNext.Before(earliest) {
+					earliest = probeNext
+				}
 				providerForError := provider
 				if providerForError == "mixed" {
 					providerForError = ""
@@ -734,6 +756,11 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
+			if fallback, probeNext := m.cooldownFallbackProbe(fallbackCandidates, now); fallback != nil {
+				return []*Auth{fallback}, nil
+			} else if !probeNext.IsZero() && probeNext.Before(earliest) {
+				earliest = probeNext
+			}
 			providerForError := provider
 			if providerForError == "mixed" {
 				providerForError = ""
@@ -763,6 +790,47 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
+func (m *Manager) cooldownFallbackProbe(candidates []cooldownFallbackCandidate, now time.Time) (*Auth, time.Time) {
+	if len(candidates) == 0 {
+		return nil, time.Time{}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.next.IsZero() != right.next.IsZero() {
+			return !left.next.IsZero()
+		}
+		if !left.next.Equal(right.next) {
+			return left.next.Before(right.next)
+		}
+		if left.priority != right.priority {
+			return left.priority > right.priority
+		}
+		leftID, rightID := "", ""
+		if left.auth != nil {
+			leftID = left.auth.ID
+		}
+		if right.auth != nil {
+			rightID = right.auth.ID
+		}
+		return leftID < rightID
+	})
+
+	var probeNext time.Time
+	for _, candidate := range candidates {
+		if candidate.auth == nil {
+			continue
+		}
+		ok, next := m.reserveHalfOpenProbe(candidate.auth.ID, candidate.model, now)
+		if ok {
+			return candidate.auth, time.Time{}
+		}
+		if !next.IsZero() && (probeNext.IsZero() || next.Before(probeNext)) {
+			probeNext = next
+		}
+	}
+	return nil, probeNext
+}
+
 func copyTriedMap(src map[string]struct{}) map[string]struct{} {
 	if len(src) == 0 {
 		return make(map[string]struct{})
@@ -788,8 +856,12 @@ func (m *Manager) nextHalfOpenProbeAt(authID, model string) time.Time {
 	}
 	m.halfOpenProbeMu.Lock()
 	defer m.halfOpenProbeMu.Unlock()
+	nowTime := time.Now()
+	if activeUntil := m.halfOpenProbeActiveUntil[key]; !activeUntil.IsZero() && !activeUntil.After(nowTime) {
+		delete(m.halfOpenProbeActiveUntil, key)
+	}
 	next := m.halfOpenProbeNext[key]
-	if !next.IsZero() && !next.After(time.Now()) {
+	if !next.IsZero() && !next.After(nowTime) {
 		delete(m.halfOpenProbeNext, key)
 		return time.Time{}
 	}
@@ -811,7 +883,32 @@ func (m *Manager) reserveHalfOpenProbe(authID, model string, now time.Time) (boo
 	}
 	next := now.Add(healthHalfOpenInterval)
 	m.halfOpenProbeNext[key] = next
+	if m.halfOpenProbeActiveUntil == nil {
+		m.halfOpenProbeActiveUntil = make(map[string]time.Time)
+	}
+	m.halfOpenProbeActiveUntil[key] = now.Add(healthHalfOpenActiveTTL)
 	return true, next
+}
+
+func (m *Manager) halfOpenProbeActive(authID, model string, now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	key := halfOpenProbeKey(authID, model)
+	if key == "\x00" {
+		return false
+	}
+	m.halfOpenProbeMu.Lock()
+	defer m.halfOpenProbeMu.Unlock()
+	activeUntil := m.halfOpenProbeActiveUntil[key]
+	if activeUntil.IsZero() {
+		return false
+	}
+	if !activeUntil.After(now) {
+		delete(m.halfOpenProbeActiveUntil, key)
+		return false
+	}
+	return true
 }
 
 func healthRequiresHalfOpenProbe(auth *Auth, model string, now time.Time) bool {
@@ -3705,8 +3802,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		checkModel := m.selectionModelForAuth(selected, model)
-		if healthRequiresHalfOpenProbe(selected, checkModel, time.Now()) {
-			if okReserve, _ := m.reserveHalfOpenProbe(selected.ID, checkModel, time.Now()); !okReserve {
+		probeNow := time.Now()
+		if healthRequiresHalfOpenProbe(selected, checkModel, probeNow) && !m.halfOpenProbeActive(selected.ID, checkModel, probeNow) {
+			if okReserve, _ := m.reserveHalfOpenProbe(selected.ID, checkModel, probeNow); !okReserve {
 				localTried[selected.ID] = struct{}{}
 				candidates = candidates[:0]
 				for _, candidate := range m.auths {
@@ -3865,8 +3963,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		checkModel := m.selectionModelForAuth(selected, model)
-		if healthRequiresHalfOpenProbe(selected, checkModel, time.Now()) {
-			if okReserve, _ := m.reserveHalfOpenProbe(selected.ID, checkModel, time.Now()); !okReserve {
+		probeNow := time.Now()
+		if healthRequiresHalfOpenProbe(selected, checkModel, probeNow) && !m.halfOpenProbeActive(selected.ID, checkModel, probeNow) {
+			if okReserve, _ := m.reserveHalfOpenProbe(selected.ID, checkModel, probeNow); !okReserve {
 				localTried[selected.ID] = struct{}{}
 				candidates = candidates[:0]
 				for _, candidate := range m.auths {

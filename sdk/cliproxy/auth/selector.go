@@ -163,6 +163,7 @@ const (
 	healthBreakerThreshold   = 50
 	healthHalfOpenSuccesses  = 2
 	healthHalfOpenInterval   = 20 * time.Second
+	healthHalfOpenActiveTTL  = 5 * time.Second
 
 	spreadLoadHalfLife          = 20 * time.Second
 	spreadLoadInflightWeight    = 4
