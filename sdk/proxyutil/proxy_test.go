@@ -1,6 +1,9 @@
 package proxyutil
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/http"
 	"testing"
 )
@@ -177,6 +180,67 @@ func TestBuildHTTPTransportNormalizesDuplicatedSOCKS5ProxyURL(t *testing.T) {
 	if transport.DialContext == nil {
 		t.Fatal("expected duplicated SOCKS5 URL to normalize into a working transport")
 	}
+}
+
+func TestBuildHTTPTransportWrapsSOCKS5DialFailure(t *testing.T) {
+	addr := closedLocalTCPAddr(t)
+	transport, mode, errBuild := BuildHTTPTransport("socks5://" + addr)
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if transport == nil || transport.DialContext == nil {
+		t.Fatal("expected SOCKS5 transport with custom DialContext")
+	}
+
+	_, errDial := transport.DialContext(context.Background(), "tcp", "example.com:443")
+	if errDial == nil {
+		t.Fatal("expected SOCKS5 dial failure")
+	}
+	var proxyErr *ProxyDialError
+	if !errors.As(errDial, &proxyErr) {
+		t.Fatalf("dial error = %T %[1]v, want ProxyDialError", errDial)
+	}
+	if proxyErr.Scheme != "socks5" || proxyErr.Host != addr {
+		t.Fatalf("proxy error = %+v, want scheme socks5 host %s", proxyErr, addr)
+	}
+}
+
+func TestBuildDialerWrapsSOCKS5DialFailure(t *testing.T) {
+	addr := closedLocalTCPAddr(t)
+	dialer, mode, errBuild := BuildDialer("socks5://" + addr)
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if dialer == nil {
+		t.Fatal("expected SOCKS5 dialer")
+	}
+
+	_, errDial := dialer.Dial("tcp", "example.com:443")
+	if errDial == nil {
+		t.Fatal("expected SOCKS5 dial failure")
+	}
+	if !IsProxyDialError(errDial) {
+		t.Fatalf("dial error = %T %[1]v, want proxy dial error", errDial)
+	}
+}
+
+func closedLocalTCPAddr(t *testing.T) string {
+	t.Helper()
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	addr := listener.Addr().String()
+	if errClose := listener.Close(); errClose != nil {
+		t.Fatalf("close listener: %v", errClose)
+	}
+	return addr
 }
 
 func TestParseMixedConcatenatedProxyURLRemainsInvalid(t *testing.T) {

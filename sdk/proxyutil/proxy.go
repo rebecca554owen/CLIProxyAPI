@@ -2,6 +2,7 @@ package proxyutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -30,6 +31,69 @@ type Setting struct {
 	Raw  string
 	Mode Mode
 	URL  *url.URL
+}
+
+// ProxyDialError wraps failures that happen while dialing through a configured proxy.
+type ProxyDialError struct {
+	Scheme string
+	Host   string
+	Err    error
+}
+
+func (e *ProxyDialError) Error() string {
+	if e == nil {
+		return ""
+	}
+	target := strings.TrimSpace(e.Host)
+	if target == "" {
+		target = "unknown"
+	}
+	scheme := strings.TrimSpace(e.Scheme)
+	if scheme == "" {
+		scheme = "proxy"
+	}
+	if e.Err == nil {
+		return fmt.Sprintf("%s proxy %s dial failed", scheme, target)
+	}
+	return fmt.Sprintf("%s proxy %s dial failed: %v", scheme, target, e.Err)
+}
+
+func (e *ProxyDialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// IsProxyDialError reports whether an error came from the configured proxy path.
+func IsProxyDialError(err error) bool {
+	var proxyErr *ProxyDialError
+	return errors.As(err, &proxyErr)
+}
+
+// IsSOCKS5ProxyURL reports whether a proxy URL explicitly uses a SOCKS5 scheme.
+func IsSOCKS5ProxyURL(raw string) bool {
+	setting, errParse := Parse(raw)
+	if errParse != nil || setting.URL == nil {
+		return false
+	}
+	return isSOCKS5Scheme(setting.URL.Scheme)
+}
+
+func isSOCKS5Scheme(scheme string) bool {
+	return strings.EqualFold(scheme, "socks5") || strings.EqualFold(scheme, "socks5h")
+}
+
+func wrapProxyDialError(setting Setting, err error) error {
+	if err == nil {
+		return nil
+	}
+	proxyErr := &ProxyDialError{Err: err}
+	if setting.URL != nil {
+		proxyErr.Scheme = setting.URL.Scheme
+		proxyErr.Host = setting.URL.Host
+	}
+	return proxyErr
 }
 
 func normalizeDuplicatedProxyURL(raw string) string {
@@ -112,7 +176,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	case ModeDirect:
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
-		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
+		if isSOCKS5Scheme(setting.URL.Scheme) {
 			var proxyAuth *proxy.Auth
 			if setting.URL.User != nil {
 				username := setting.URL.User.Username()
@@ -126,7 +190,11 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
 			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
+				conn, errDial := dialer.Dial(network, addr)
+				if errDial != nil {
+					return nil, wrapProxyDialError(setting, errDial)
+				}
+				return conn, nil
 			}
 			return transport, setting.Mode, nil
 		}
@@ -155,8 +223,24 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		if errDialer != nil {
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
 		}
-		return dialer, setting.Mode, nil
+		return proxyDialer{setting: setting, next: dialer}, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+type proxyDialer struct {
+	setting Setting
+	next    proxy.Dialer
+}
+
+func (d proxyDialer) Dial(network, addr string) (net.Conn, error) {
+	if d.next == nil {
+		return nil, wrapProxyDialError(d.setting, fmt.Errorf("proxy dialer is nil"))
+	}
+	conn, errDial := d.next.Dial(network, addr)
+	if errDial != nil {
+		return nil, wrapProxyDialError(d.setting, errDial)
+	}
+	return conn, nil
 }

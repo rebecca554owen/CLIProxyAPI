@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -101,6 +102,8 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+	// Cause keeps the original executor error for typed infrastructure failures.
+	Cause error
 }
 
 // Selector chooses an auth candidate for execution.
@@ -1360,7 +1363,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: chunk.Err})
 				if shouldEvictUnauthorizedResult(rerr) {
 					if errEvict := m.evictUnauthorizedAuth(ctx, auth, provider, resultModel); errEvict != nil {
 						logEntryWithRequestID(ctx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
@@ -1425,7 +1428,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: errStream}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			if shouldEvictUnauthorizedError(errStream) {
@@ -1450,7 +1453,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -1462,7 +1465,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -1474,7 +1477,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -1486,7 +1489,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
@@ -1934,6 +1937,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
+				result.Cause = errExec
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
 				}
@@ -2030,6 +2034,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
+				result.Cause = errExec
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
 				}
@@ -2803,7 +2808,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		now := time.Now()
 		codexBypassCooling := isCodexAuth(auth)
 
-		if result.Success {
+		if shouldDisableAuthForProxyFailure(auth, result) {
+			disableAuthForProxyFailure(auth, result, now)
+			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+			if cfg == nil {
+				cfg = &internalconfig.Config{}
+			}
+			m.rebuildAPIKeyModelAliasLocked(cfg)
+			logEntryWithRequestID(ctx).WithFields(log.Fields{
+				"auth_id":  auth.ID,
+				"provider": auth.Provider,
+				"model":    result.Model,
+			}).Warn("disabled auth because SOCKS5 proxy dialing failed")
+		} else if result.Success {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
@@ -3570,6 +3587,49 @@ func isRequestInvalidError(err error) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func shouldDisableAuthForProxyFailure(auth *Auth, result Result) bool {
+	if auth == nil || result.Success {
+		return false
+	}
+	if strings.TrimSpace(auth.ProxyURL) == "" || !proxyutil.IsSOCKS5ProxyURL(auth.ProxyURL) {
+		return false
+	}
+	return proxyutil.IsProxyDialError(result.Cause)
+}
+
+func disableAuthForProxyFailure(auth *Auth, result Result, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = true
+	auth.Unavailable = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = "disabled due to SOCKS5 proxy failure"
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota = QuotaState{}
+	auth.UpdatedAt = now
+	if result.Error != nil {
+		auth.LastError = cloneError(result.Error)
+	} else if result.Cause != nil {
+		auth.LastError = &Error{Code: "proxy_dial_failed", Message: result.Cause.Error(), Retryable: true}
+	}
+	if result.Model != "" {
+		state := ensureModelState(auth, result.Model)
+		if state != nil {
+			state.Status = StatusDisabled
+			state.StatusMessage = auth.StatusMessage
+			state.Unavailable = true
+			state.NextRetryAfter = time.Time{}
+			state.UpdatedAt = now
+			if result.Error != nil {
+				state.LastError = cloneError(result.Error)
+			} else if result.Cause != nil {
+				state.LastError = &Error{Code: "proxy_dial_failed", Message: result.Cause.Error(), Retryable: true}
+			}
+		}
 	}
 }
 
