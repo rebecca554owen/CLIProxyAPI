@@ -73,7 +73,7 @@ const (
 	quotaBackoffBase                 = time.Second
 	quotaBackoffMax                  = 30 * time.Minute
 	quotaHardCooldownFailures        = health429OpenFailures
-	quotaImmediateCooldownRetryAfter = 5 * time.Minute
+	quotaImmediateCooldownRetryAfter = 15 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool

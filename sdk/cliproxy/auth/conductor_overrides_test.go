@@ -311,6 +311,50 @@ func TestManager_MarkResult_429StaysSoftBeforeRepeatedQuotaFailures(t *testing.T
 	}
 }
 
+func TestManager_MarkResult_429ModerateRetryAfterDoesNotHardCooldownImmediately(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "moderate-retry-after-auth",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "moderate-retry-after-model"
+	retryAfter := 5 * time.Minute
+	m.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Model:      model,
+		Success:    false,
+		RetryAfter: &retryAfter,
+		Error:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after 429")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state not found after 429")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("cooldown = %v, want zero for moderate retry-after before repeated failures", state.NextRetryAfter)
+	}
+	if !state.Quota.Exceeded {
+		t.Fatal("expected quota pressure to be recorded")
+	}
+	if got := state.Health.ConsecutiveFailures; got != 1 {
+		t.Fatalf("consecutive failures = %d, want 1", got)
+	}
+}
+
 func TestManager_Execute_SequentialFillMaxRetryCredentialsAllowsThreeFallbacks(t *testing.T) {
 	model := "sf-max-retry-credentials-model"
 	selector := &SequentialFillSelector{
