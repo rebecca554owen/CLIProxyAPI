@@ -3,6 +3,7 @@ package responses
 import (
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -34,6 +35,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	rawJSON = normalizeResponsesStructuredOutputSchema(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
@@ -43,6 +45,25 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
 	return rawJSON
+}
+
+func normalizeResponsesStructuredOutputSchema(rawJSON []byte) []byte {
+	textFormat := gjson.GetBytes(rawJSON, "text.format")
+	if !textFormat.Exists() || textFormat.Get("type").String() != "json_schema" {
+		return rawJSON
+	}
+
+	schema := textFormat.Get("schema")
+	cleaned := util.CleanJSONSchemaForOpenAIStructuredOutput("")
+	if schema.Exists() {
+		cleaned = util.CleanJSONSchemaForOpenAIStructuredOutput(schema.Raw)
+	}
+
+	updated, err := sjson.SetRawBytes(rawJSON, "text.format.schema", []byte(cleaned))
+	if err != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction

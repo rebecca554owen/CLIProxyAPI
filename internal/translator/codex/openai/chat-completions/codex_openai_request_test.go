@@ -655,7 +655,8 @@ func TestStructuredOutputAndToolsSchemasAreCleaned(t *testing.T) {
 									{"type": "object", "properties": {"title": {"type": "string"}}}
 								]
 							}
-						}
+						},
+						"explicit": {"type": "boolean"}
 					}
 				}
 			}
@@ -686,6 +687,11 @@ func TestStructuredOutputAndToolsSchemasAreCleaned(t *testing.T) {
 	}
 	if got := gjson.Get(result, "text.format.schema.additionalProperties"); !got.Exists() || got.Bool() {
 		t.Fatalf("response schema additionalProperties should be false: %s", result)
+	}
+	for _, key := range []string{"explicit", "rewardTitleEffects"} {
+		if !jsonArrayContains(gjson.Get(result, "text.format.schema.required").Array(), key) {
+			t.Fatalf("response schema required missing %q: %s", key, result)
+		}
 	}
 	if got := gjson.Get(result, "tools.0.parameters.properties.sessions.items.type").String(); got == "" {
 		t.Fatalf("tool array items should be normalized: %s", result)
@@ -729,4 +735,13 @@ func TestNormalizeClaudeStyleToolBlocksInChatMessages(t *testing.T) {
 	if items[2].Get("type").String() != "function_call_output" {
 		t.Fatalf("expected function_call_output tail: %s", gjson.GetBytes(out, "input").Raw)
 	}
+}
+
+func jsonArrayContains(values []gjson.Result, want string) bool {
+	for _, value := range values {
+		if value.String() == want {
+			return true
+		}
+	}
+	return false
 }

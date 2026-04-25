@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -10,6 +11,14 @@ import (
 const strictObjectJSONSchema = `{"type":"object","properties":{},"additionalProperties":false}`
 
 func CleanJSONSchemaForStrictUpstream(jsonStr string) string {
+	return cleanJSONSchemaForStrictUpstream(jsonStr, false)
+}
+
+func CleanJSONSchemaForOpenAIStructuredOutput(jsonStr string) string {
+	return cleanJSONSchemaForStrictUpstream(jsonStr, true)
+}
+
+func cleanJSONSchemaForStrictUpstream(jsonStr string, requireAllObjectProperties bool) string {
 	jsonStr = strings.TrimSpace(jsonStr)
 	if jsonStr == "" || jsonStr == "null" || !gjson.Valid(jsonStr) {
 		return strictObjectJSONSchema
@@ -39,10 +48,14 @@ func CleanJSONSchemaForStrictUpstream(jsonStr string) string {
 		}
 		root["additionalProperties"] = false
 	}
-	if req := normalizeStringArray(root["required"]); len(req) > 0 {
-		root["required"] = req
+	if requireAllObjectProperties {
+		requireAllPropertiesForObjects(root)
 	} else {
-		delete(root, "required")
+		if req := normalizeStringArray(root["required"]); len(req) > 0 {
+			root["required"] = req
+		} else {
+			delete(root, "required")
+		}
 	}
 
 	out, err := json.Marshal(root)
@@ -118,6 +131,38 @@ func normalizeStrictSchemaNode(node any) any {
 		return out
 	default:
 		return value
+	}
+}
+
+func requireAllPropertiesForObjects(node any) {
+	switch value := node.(type) {
+	case map[string]any:
+		for _, raw := range value {
+			requireAllPropertiesForObjects(raw)
+		}
+
+		schemaType, _ := value["type"].(string)
+		if schemaType != "object" {
+			return
+		}
+		properties, ok := value["properties"].(map[string]any)
+		if !ok {
+			value["required"] = []string{}
+			return
+		}
+		keys := make([]string, 0, len(properties))
+		for key := range properties {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		value["required"] = keys
+	case []any:
+		for _, item := range value {
+			requireAllPropertiesForObjects(item)
+		}
 	}
 }
 

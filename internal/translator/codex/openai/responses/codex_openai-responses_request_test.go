@@ -310,6 +310,39 @@ func TestConvertOpenAIResponsesRequestToCodex_NormalizesTopLevelToolChoicePrevie
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesStructuredOutputRequiredFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4-mini",
+		"input": "summarize",
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"name": "PromptRepresentation",
+				"schema": {
+					"type": "object",
+					"properties": {
+						"title": {"type": "string"},
+						"explicit": {"type": "boolean"}
+					},
+					"required": ["title"]
+				}
+			}
+		}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4-mini", inputJSON, false)
+	required := gjson.GetBytes(output, "text.format.schema.required").Array()
+
+	for _, key := range []string{"explicit", "title"} {
+		if !jsonArrayContains(required, key) {
+			t.Fatalf("text.format.schema.required missing %q: %s", key, string(output))
+		}
+	}
+	if got := gjson.GetBytes(output, "text.format.schema.additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("text.format.schema.additionalProperties should be false: %s", string(output))
+	}
+}
+
 func TestUserFieldDeletion(t *testing.T) {
 	inputJSON := []byte(`{  
 		"model": "gpt-5.2",  
@@ -348,6 +381,15 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
 	if gjson.Get(outputStr, "truncation").Exists() {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
+}
+
+func jsonArrayContains(values []gjson.Result, want string) bool {
+	for _, value := range values {
+		if value.String() == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestTruncationRemovedForCodexCompatibility(t *testing.T) {

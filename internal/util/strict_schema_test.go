@@ -106,3 +106,52 @@ func TestCleanJSONSchemaForStrictUpstream_AddsAdditionalPropertiesFalseRecursive
 		t.Fatalf("nested additionalProperties should be false: %s", result)
 	}
 }
+
+func TestCleanJSONSchemaForOpenAIStructuredOutput_RequiresAllObjectProperties(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"},
+			"explicit": {"type": "boolean"},
+			"metadata": {
+				"type": "object",
+				"properties": {
+					"source": {"type": "string"},
+					"confidence": {"type": ["number", "null"]}
+				},
+				"required": ["source"]
+			}
+		},
+		"required": ["name"]
+	}`
+
+	result := CleanJSONSchemaForOpenAIStructuredOutput(input)
+
+	required := gjson.Get(result, "required").Array()
+	if len(required) != 3 {
+		t.Fatalf("root required should include every property, got %s in %s", gjson.Get(result, "required").Raw, result)
+	}
+	for _, key := range []string{"explicit", "metadata", "name"} {
+		if !containsGJSONString(required, key) {
+			t.Fatalf("root required missing %q: %s", key, result)
+		}
+	}
+	nestedRequired := gjson.Get(result, "properties.metadata.required").Array()
+	if len(nestedRequired) != 2 {
+		t.Fatalf("nested required should include every property, got %s in %s", gjson.Get(result, "properties.metadata.required").Raw, result)
+	}
+	for _, key := range []string{"confidence", "source"} {
+		if !containsGJSONString(nestedRequired, key) {
+			t.Fatalf("nested required missing %q: %s", key, result)
+		}
+	}
+}
+
+func containsGJSONString(values []gjson.Result, want string) bool {
+	for _, value := range values {
+		if value.String() == want {
+			return true
+		}
+	}
+	return false
+}

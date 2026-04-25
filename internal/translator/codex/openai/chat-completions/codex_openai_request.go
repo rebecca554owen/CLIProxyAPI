@@ -263,10 +263,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					out, _ = sjson.SetBytes(out, "text.format.strict", v.Value())
 				}
 				if v := js.Get("schema"); v.Exists() {
-					cleaned := util.CleanJSONSchemaForStrictUpstream(v.Raw)
+					cleaned := util.CleanJSONSchemaForOpenAIStructuredOutput(v.Raw)
 					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(cleaned))
 				} else {
-					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
+					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(util.CleanJSONSchemaForOpenAIStructuredOutput("")))
 				}
 			}
 		}
