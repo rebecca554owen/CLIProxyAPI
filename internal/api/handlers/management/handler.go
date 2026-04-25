@@ -310,17 +310,23 @@ func (h *Handler) persist(c *gin.Context) bool {
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
+	oldSnap, ok := h.checkConfigWritePreconditionLocked(c)
+	if !ok {
+		return false
+	}
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	newSnap := h.snapshotAfterConfigWrite(c)
+	h.auditConfigWrite(c, "structured", configVersionFromSnapshot(oldSnap), configVersionFromSnapshot(newSnap), len(oldSnap.data), len(newSnap.data), configWritePrecondition(c) != "")
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
 	}
 	h.syncRuntimeConfigLocked(ctx)
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": configVersionFromSnapshot(newSnap)})
 	return true
 }
 

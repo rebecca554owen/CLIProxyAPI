@@ -49,6 +49,23 @@ func newTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+func TestInjectManagementConfigVersionGuard(t *testing.T) {
+	html := []byte("<html><body><main>ok</main></body></html>")
+
+	out := injectManagementConfigVersionGuard(html)
+
+	if !strings.Contains(string(out), "cliproxy-config-version-guard") {
+		t.Fatalf("expected injected guard script, got %s", string(out))
+	}
+	if strings.Index(string(out), "cliproxy-config-version-guard") > strings.Index(string(out), "</body>") {
+		t.Fatalf("guard script should be injected before closing body: %s", string(out))
+	}
+	again := injectManagementConfigVersionGuard(out)
+	if string(again) != string(out) {
+		t.Fatalf("guard injection should be idempotent")
+	}
+}
+
 func TestUsagePersistenceEnabledHotReload(t *testing.T) {
 	t.Setenv("PGSTORE_DSN", "")
 	t.Setenv("pgstore_dsn", "")

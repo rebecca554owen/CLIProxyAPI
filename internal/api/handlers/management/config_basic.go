@@ -26,6 +26,7 @@ const (
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{})
 		return
@@ -150,6 +151,10 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	oldSnap, ok := h.checkConfigWritePreconditionLocked(c)
+	if !ok {
+		return
+	}
 	if WriteConfig(h.configFilePath, body) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
@@ -162,7 +167,9 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	}
 	h.cfg = newCfg
 	h.syncRuntimeConfigLocked(c.Request.Context())
-	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
+	newSnap := h.snapshotAfterConfigWrite(c)
+	h.auditConfigWrite(c, "raw-yaml", configVersionFromSnapshot(oldSnap), configVersionFromSnapshot(newSnap), len(oldSnap.data), len(newSnap.data), configWritePrecondition(c) != "")
+	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}, "config-version": configVersionFromSnapshot(newSnap)})
 }
 
 // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
@@ -176,6 +183,9 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed", "message": err.Error()})
 		return
+	}
+	if info, errStat := os.Stat(h.configFilePath); errStat == nil {
+		setConfigSnapshotHeaders(c, newConfigSnapshot(data, info))
 	}
 	c.Header("Content-Type", "application/yaml; charset=utf-8")
 	c.Header("Cache-Control", "no-store")

@@ -105,7 +105,10 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
+	c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
 		h.cfg.APIKeys = append([]string(nil), v...)
@@ -120,6 +123,7 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 
 // gemini-api-key: []GeminiKey
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
 	c.JSON(200, gin.H{"gemini-api-key": h.geminiKeysWithAuthIndex()})
 }
 func (h *Handler) PutGeminiKeys(c *gin.Context) {
@@ -277,6 +281,7 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 
 // claude-api-key: []ClaudeKey
 func (h *Handler) GetClaudeKeys(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
 	c.JSON(200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
 }
 func (h *Handler) PutClaudeKeys(c *gin.Context) {
@@ -428,6 +433,7 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 
 // openai-compatibility: []OpenAICompatibility
 func (h *Handler) GetOpenAICompat(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
 	c.JSON(200, gin.H{"openai-compatibility": h.openAICompatibilityWithAuthIndex()})
 }
 func (h *Handler) PutOpenAICompat(c *gin.Context) {
@@ -565,6 +571,7 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 
 // vertex-api-key: []VertexCompatKey
 func (h *Handler) GetVertexCompatKeys(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
 	c.JSON(200, gin.H{"vertex-api-key": h.vertexCompatKeysWithAuthIndex()})
 }
 func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
@@ -918,6 +925,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 
 // codex-api-key: []CodexKey
 func (h *Handler) GetCodexKeys(c *gin.Context) {
+	h.setConfigVersionHeaders(c)
 	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
 }
 func (h *Handler) PutCodexKeys(c *gin.Context) {

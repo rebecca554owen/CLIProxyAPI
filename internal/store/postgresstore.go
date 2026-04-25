@@ -487,13 +487,10 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 }
 
 func chooseConfigBootstrapMode(localExists, localValid bool, localModTime time.Time, dbExists bool, dbUpdatedAt time.Time, dbHasContent bool) configBootstrapMode {
-	if !dbExists || !dbHasContent {
+	if localExists && localValid {
 		return configBootstrapImportLocal
 	}
-	if !localExists || !localValid {
-		return configBootstrapSyncDatabase
-	}
-	if !dbUpdatedAt.IsZero() && localModTime.Before(dbUpdatedAt) {
+	if dbExists && dbHasContent {
 		return configBootstrapSyncDatabase
 	}
 	return configBootstrapImportLocal

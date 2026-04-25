@@ -104,6 +104,102 @@ func TestPutUsageRetentionDaysPersistsAndUpdatesPlugin(t *testing.T) {
 	}
 }
 
+func TestGetConfigYAMLReturnsVersionHeaders(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	h := NewHandler(&config.Config{}, configPath, coreauth.NewManager(nil, nil, nil))
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
+
+	h.GetConfigYAML(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GetConfigYAML status = %d, want %d with body %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get(configVersionHeader); got == "" {
+		t.Fatalf("expected %s response header", configVersionHeader)
+	}
+	if got := rec.Header().Get(configETagHeader); got == "" {
+		t.Fatalf("expected %s response header", configETagHeader)
+	}
+}
+
+func TestPutConfigYAMLRejectsStaleVersion(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	original := []byte("port: 8317\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	h := NewHandler(&config.Config{}, configPath, coreauth.NewManager(nil, nil, nil))
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader("port: 9000\n"))
+	ctx.Request.Header.Set("If-Match", `"sha256:stale"`)
+
+	h.PutConfigYAML(ctx)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("PutConfigYAML status = %d, want %d with body %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("config file changed after conflict: %q", string(data))
+	}
+}
+
+func TestStructuredConfigWriteRejectsStaleVersionAndRestoresMemory(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("routing:\n  strategy: round-robin\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{Strategy: "round-robin"},
+	}
+	h := NewHandler(cfg, configPath, coreauth.NewManager(nil, nil, nil))
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/routing/strategy", strings.NewReader(`{"value":"sf"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.Header.Set("If-Match", `"sha256:stale"`)
+
+	h.PutRoutingStrategy(ctx)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("PutRoutingStrategy status = %d, want %d with body %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if got := h.cfg.Routing.Strategy; got != "round-robin" {
+		t.Fatalf("handler config strategy = %q, want restored round-robin", got)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	if !strings.Contains(string(data), "round-robin") {
+		t.Fatalf("saved config = %q, want original round-robin", string(data))
+	}
+}
+
 func TestCleanupMonitorLogsDeletesExpiredRecords(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

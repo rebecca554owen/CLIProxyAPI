@@ -67,14 +67,14 @@ func TestChooseConfigBootstrapMode(t *testing.T) {
 			want:         configBootstrapSyncDatabase,
 		},
 		{
-			name:         "sync database when database newer",
+			name:         "import local even when database newer",
 			localExists:  true,
 			localValid:   true,
 			localModTime: now,
 			dbExists:     true,
 			dbUpdatedAt:  now.Add(time.Minute),
 			dbHasContent: true,
-			want:         configBootstrapSyncDatabase,
+			want:         configBootstrapImportLocal,
 		},
 		{
 			name:         "import local when local newer",
