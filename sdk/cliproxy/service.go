@@ -14,6 +14,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -1515,7 +1516,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "openai", "codex")
+	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "codex"))
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
