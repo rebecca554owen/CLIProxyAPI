@@ -2359,3 +2359,42 @@ func TestValidateClaudeUpstreamPayload_NonMiniMaxAllowsStructuredOutputFormat(t 
 		t.Fatalf("expected nil error, got %v", err)
 	}
 }
+
+func TestValidateClaudeUpstreamPayload_MiniMaxRejectsServerTool(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"MiniMax-M2.5",
+		"messages":[{"role":"user","content":[{"type":"text","text":"search"}]}],
+		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}]
+	}`)
+
+	err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", payload)
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if se.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", se.StatusCode(), http.StatusBadRequest)
+	}
+	if !strings.Contains(err.Error(), "request_feature_unsupported:") {
+		t.Fatalf("error = %q, want request_feature_unsupported prefix", err.Error())
+	}
+}
+
+func TestValidateClaudeUpstreamPayload_MiniMaxAllowsCustomTypedToolWithSchema(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"MiniMax-M2.5",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"tools":[{"type":"custom","name":"lookup","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}]
+	}`)
+
+	if err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", payload); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}

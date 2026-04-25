@@ -1045,6 +1045,9 @@ func validateClaudeUpstreamPayload(baseURL string, body []byte) error {
 	if err := validateMiniMaxStructuredOutputCompatibility(body); err != nil {
 		return err
 	}
+	if err := validateMiniMaxServerToolCompatibility(body); err != nil {
+		return err
+	}
 	return validateMiniMaxToolResultAdjacency(body)
 }
 
@@ -1062,6 +1065,38 @@ func validateMiniMaxStructuredOutputCompatibility(body []byte) error {
 	return statusErr{
 		code: http.StatusBadRequest,
 		msg:  "request_feature_unsupported: minimax anthropic compatibility does not support output_config.format",
+	}
+}
+
+func validateMiniMaxServerToolCompatibility(body []byte) error {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return nil
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	var unsupportedType string
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if !tool.IsObject() {
+			return true
+		}
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		if toolType == "" {
+			return true
+		}
+		if tool.Get("input_schema").Exists() {
+			return true
+		}
+		unsupportedType = toolType
+		return false
+	})
+	if unsupportedType == "" {
+		return nil
+	}
+	return statusErr{
+		code: http.StatusBadRequest,
+		msg:  fmt.Sprintf("request_feature_unsupported: minimax anthropic compatibility does not support server tool type %q", unsupportedType),
 	}
 }
 

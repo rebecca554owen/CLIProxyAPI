@@ -19,6 +19,11 @@ func TestInferCompatKindFromBaseURL(t *testing.T) {
 			want:    "minimax",
 		},
 		{
+			name:    "minimax global alternate anthropic",
+			baseURL: "https://api.minimax.io/anthropic/v1/messages",
+			want:    "minimax",
+		},
+		{
 			name:    "minimax trailing slash",
 			baseURL: "https://api.minimaxi.com/anthropic/",
 			want:    "minimax",
