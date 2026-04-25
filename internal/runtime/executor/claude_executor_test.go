@@ -1068,6 +1068,134 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	}
 }
 
+func TestSanitizeClaudeToolNamesForUpstream_RewritesAndRestores(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"name":"skill:pet_animals","input_schema":{"type":"object"}},
+			{"type":"web_search_20250305","name":"web_search"}
+		],
+		"tool_choice":{"type":"tool","name":"skill:pet_animals"},
+		"messages":[{"role":"assistant","content":[
+			{"type":"tool_use","name":"skill:pet_animals","id":"toolu_1","input":{}},
+			{"type":"tool_reference","tool_name":"skill:pet_animals"},
+			{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"skill:pet_animals"}]}
+		]}]
+	}`)
+
+	out, mapping := sanitizeClaudeToolNamesForUpstream(input)
+	if mapping == nil {
+		t.Fatal("expected invalid tool name to be sanitized")
+	}
+	for _, path := range []string{
+		"tools.0.name",
+		"tool_choice.name",
+		"messages.0.content.0.name",
+		"messages.0.content.1.tool_name",
+		"messages.0.content.2.content.0.tool_name",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != "skill_pet_animals" {
+			t.Fatalf("%s = %q, want %q", path, got, "skill_pet_animals")
+		}
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "web_search" {
+		t.Fatalf("built-in tool name = %q, want web_search", got)
+	}
+
+	response := restoreClaudeToolNamesFromResponse([]byte(`{"content":[
+		{"type":"tool_use","name":"skill_pet_animals","id":"toolu_2","input":{}},
+		{"type":"tool_reference","tool_name":"skill_pet_animals"},
+		{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"tool_reference","tool_name":"skill_pet_animals"}]}
+	]}`), mapping)
+	for _, path := range []string{
+		"content.0.name",
+		"content.1.tool_name",
+		"content.2.content.0.tool_name",
+	} {
+		if got := gjson.GetBytes(response, path).String(); got != "skill:pet_animals" {
+			t.Fatalf("%s = %q, want %q", path, got, "skill:pet_animals")
+		}
+	}
+
+	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"skill_pet_animals","id":"toolu_3"},"index":0}`)
+	restoredLine := restoreClaudeToolNamesFromStreamLine(line, mapping)
+	payload := bytes.TrimSpace(restoredLine)
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if got := gjson.GetBytes(payload, "content_block.name").String(); got != "skill:pet_animals" {
+		t.Fatalf("stream content_block.name = %q, want %q", got, "skill:pet_animals")
+	}
+}
+
+func TestSanitizeClaudeToolNamesForUpstream_AvoidsCollisions(t *testing.T) {
+	input := []byte(`{"tools":[{"name":"skill_pet_animals"},{"name":"skill:pet_animals"}]}`)
+
+	out, mapping := sanitizeClaudeToolNamesForUpstream(input)
+	if mapping == nil {
+		t.Fatal("expected invalid tool name to be sanitized")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "skill_pet_animals" {
+		t.Fatalf("valid tool name changed to %q", got)
+	}
+	sanitized := gjson.GetBytes(out, "tools.1.name").String()
+	if sanitized == "skill_pet_animals" {
+		t.Fatal("sanitized invalid tool name collided with an existing valid tool")
+	}
+	if !strings.HasPrefix(sanitized, "skill_pet_animals_") {
+		t.Fatalf("sanitized collision name = %q, want skill_pet_animals_<hash>", sanitized)
+	}
+	if !isValidClaudeToolName(sanitized) {
+		t.Fatalf("sanitized collision name %q is not Anthropic-compatible", sanitized)
+	}
+
+	response := restoreClaudeToolNamesFromResponse([]byte(fmt.Sprintf(`{"content":[{"type":"tool_use","name":%q,"id":"toolu_1","input":{}}]}`, sanitized)), mapping)
+	if got := gjson.GetBytes(response, "content.0.name").String(); got != "skill:pet_animals" {
+		t.Fatalf("restored tool name = %q, want %q", got, "skill:pet_animals")
+	}
+}
+
+func TestClaudeExecutor_Execute_SanitizesInvalidToolNamesForAPIKeyUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		name := gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"tool_use","name":%q,"id":"toolu_1","input":{}}],"usage":{"input_tokens":1,"output_tokens":1}}`, name)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"tools":[{"name":"skill:pet_animals","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"skill:pet_animals"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "skill_pet_animals" {
+		t.Fatalf("upstream tools.0.name = %q, want %q", got, "skill_pet_animals")
+	}
+	if got := gjson.GetBytes(seenBody, "tool_choice.name").String(); got != "skill_pet_animals" {
+		t.Fatalf("upstream tool_choice.name = %q, want %q", got, "skill_pet_animals")
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.name").String(); got != "skill:pet_animals" {
+		t.Fatalf("downstream content.0.name = %q, want original name", got)
+	}
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
