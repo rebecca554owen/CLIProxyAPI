@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,8 +126,17 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
+	toolNameSanitization, errSanitize := sanitizeClaudeHTTPRequestToolNames(httpReq)
+	if errSanitize != nil {
+		return nil, errSanitize
+	}
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	resp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		return nil, errDo
+	}
+	restoreClaudeHTTPResponseToolNames(resp, toolNameSanitization)
+	return resp, nil
 }
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -1349,6 +1359,104 @@ func sanitizeClaudeToolNamesForUpstream(body []byte) ([]byte, *claudeToolNameSan
 		}
 		return name
 	}), mapping
+}
+
+func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanitization, error) {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return nil, nil
+	}
+	body, errRead := io.ReadAll(req.Body)
+	if errRead != nil {
+		return nil, errRead
+	}
+	if errClose := req.Body.Close(); errClose != nil {
+		log.Errorf("request body close error: %v", errClose)
+	}
+	updated, mapping := sanitizeClaudeToolNamesForUpstream(body)
+	req.Body = io.NopCloser(bytes.NewReader(updated))
+	req.ContentLength = int64(len(updated))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(updated)), nil
+	}
+	if req.Header != nil {
+		req.Header.Set("Content-Length", strconv.Itoa(len(updated)))
+	}
+	return mapping, nil
+}
+
+func restoreClaudeHTTPResponseToolNames(resp *http.Response, mapping *claudeToolNameSanitization) {
+	if resp == nil || resp.Body == nil || mapping == nil || len(mapping.upstreamToOriginal) == 0 {
+		return
+	}
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "text/event-stream") {
+		resp.Body = newClaudeToolNameRestoringStream(resp.Body, mapping)
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
+		return
+	}
+	if strings.TrimSpace(resp.Header.Get("Content-Encoding")) != "" {
+		return
+	}
+	data, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		log.Errorf("response body read error: %v", errRead)
+		return
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		log.Errorf("response body close error: %v", errClose)
+	}
+	data = restoreClaudeToolNamesFromResponse(data, mapping)
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	resp.ContentLength = int64(len(data))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(data)))
+}
+
+type claudeToolNameRestoringStream struct {
+	*io.PipeReader
+	upstream io.Closer
+}
+
+func newClaudeToolNameRestoringStream(upstream io.ReadCloser, mapping *claudeToolNameSanitization) io.ReadCloser {
+	reader, writer := io.Pipe()
+	go func() {
+		defer func() {
+			if errClose := upstream.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+		}()
+		scanner := bufio.NewScanner(upstream)
+		scanner.Buffer(nil, 52_428_800)
+		for scanner.Scan() {
+			line := restoreClaudeToolNamesFromStreamLine(scanner.Bytes(), mapping)
+			if _, errWrite := writer.Write(line); errWrite != nil {
+				_ = writer.CloseWithError(errWrite)
+				return
+			}
+			if _, errWrite := writer.Write([]byte("\n")); errWrite != nil {
+				_ = writer.CloseWithError(errWrite)
+				return
+			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			_ = writer.CloseWithError(errScan)
+			return
+		}
+		_ = writer.Close()
+	}()
+	return &claudeToolNameRestoringStream{PipeReader: reader, upstream: upstream}
+}
+
+func (s *claudeToolNameRestoringStream) Close() error {
+	errReader := s.PipeReader.Close()
+	if s.upstream == nil {
+		return errReader
+	}
+	errUpstream := s.upstream.Close()
+	if errReader != nil {
+		return errReader
+	}
+	return errUpstream
 }
 
 func collectClaudeCustomToolNames(body []byte) map[string]bool {

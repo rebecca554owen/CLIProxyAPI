@@ -1196,6 +1196,57 @@ func TestClaudeExecutor_Execute_SanitizesInvalidToolNamesForAPIKeyUpstream(t *te
 	}
 }
 
+func TestClaudeExecutor_HttpRequest_SanitizesDirectMessagesToolNames(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"skill_pet_animals","id":"toolu_1"},"index":0}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key": "key-123",
+	}}
+	payload := []byte(`{
+		"tools":[{"name":"skill:pet_animals","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"skill:pet_animals"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"stream":true
+	}`)
+	req, errReq := http.NewRequest(http.MethodPost, server.URL+"/v1/messages?beta=true", bytes.NewReader(payload))
+	if errReq != nil {
+		t.Fatalf("new request: %v", errReq)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := executor.HttpRequest(context.Background(), auth, req)
+	if err != nil {
+		t.Fatalf("HttpRequest error: %v", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Fatalf("response body close error: %v", errClose)
+		}
+	}()
+	data, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		t.Fatalf("read response body: %v", errRead)
+	}
+
+	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "skill_pet_animals" {
+		t.Fatalf("upstream tools.0.name = %q, want %q", got, "skill_pet_animals")
+	}
+	if got := gjson.GetBytes(seenBody, "tool_choice.name").String(); got != "skill_pet_animals" {
+		t.Fatalf("upstream tool_choice.name = %q, want %q", got, "skill_pet_animals")
+	}
+	if !bytes.Contains(data, []byte(`"name":"skill:pet_animals"`)) {
+		t.Fatalf("downstream stream did not restore tool name: %s", string(data))
+	}
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
