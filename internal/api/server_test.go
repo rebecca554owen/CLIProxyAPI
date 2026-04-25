@@ -66,6 +66,23 @@ func TestInjectManagementConfigVersionGuard(t *testing.T) {
 	}
 }
 
+func TestInjectManagementConfigVersionGuardReplacesOldGuard(t *testing.T) {
+	html := []byte(`<html><body><script id="cliproxy-config-version-guard">old guard</script><main>ok</main></body></html>`)
+
+	out := injectManagementConfigVersionGuard(html)
+	body := string(out)
+
+	if strings.Contains(body, "old guard") {
+		t.Fatalf("expected old guard script to be replaced: %s", body)
+	}
+	if strings.Count(body, "cliproxy-config-version-guard") != 1 {
+		t.Fatalf("expected exactly one guard script, got %s", body)
+	}
+	if !strings.Contains(body, "writeQueue") {
+		t.Fatalf("expected serialized write queue in guard script: %s", body)
+	}
+}
+
 func TestUsagePersistenceEnabledHotReload(t *testing.T) {
 	t.Setenv("PGSTORE_DSN", "")
 	t.Setenv("pgstore_dsn", "")

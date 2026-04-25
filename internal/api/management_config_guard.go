@@ -13,6 +13,8 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
   if (window.__cliproxyConfigVersionGuard) return;
   window.__cliproxyConfigVersionGuard = true;
   var latestConfigVersion = "";
+  var writeQueue = Promise.resolve();
+  var conflictAlertVisible = false;
   var originalFetch = window.fetch ? window.fetch.bind(window) : null;
   if (!originalFetch) return;
 
@@ -34,28 +36,55 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
     return path.indexOf("/v0/management/") === 0;
   }
 
+  function observeResponseVersion(response) {
+    var nextVersion = response && response.headers && response.headers.get("X-Config-Version");
+    if (nextVersion) latestConfigVersion = nextVersion;
+  }
+
+  function showConflictAlertOnce() {
+    if (conflictAlertVisible) return;
+    conflictAlertVisible = true;
+    window.alert("配置文件已被其他操作修改，请刷新页面后再保存，避免覆盖最新配置。");
+    window.setTimeout(function () { conflictAlertVisible = false; }, 1000);
+  }
+
+  function handleConflictResponse(response) {
+    if (!response || response.status !== 409) return;
+    response.clone().json().then(function (body) {
+      if (body && body["current-version"]) latestConfigVersion = body["current-version"];
+      if (body && body.error === "config_conflict") showConflictAlertOnce();
+    }).catch(function () {});
+  }
+
+  function enqueueWrite(task) {
+    var previous = writeQueue.catch(function () {});
+    var next = previous.then(task, task);
+    writeQueue = next.catch(function () {});
+    return next;
+  }
+
   window.fetch = async function (input, init) {
     init = init || {};
     var method = requestMethod(input, init);
     var path = requestPath(input);
-    var headers = new Headers(init.headers || (input && input.headers) || {});
-    if (latestConfigVersion && shouldGuard(method, path) && !headers.has("If-Match") && !headers.has("X-Config-Version")) {
-      headers.set("If-Match", '"' + latestConfigVersion + '"');
-      init = Object.assign({}, init, { headers: headers });
-    }
+    var guarded = shouldGuard(method, path);
 
-    var response = await originalFetch(input, init);
-    var nextVersion = response.headers && response.headers.get("X-Config-Version");
-    if (nextVersion) latestConfigVersion = nextVersion;
+    var send = async function () {
+      var headers = new Headers(init.headers || (input && input.headers) || {});
+      if (latestConfigVersion && guarded && !headers.has("If-Match") && !headers.has("X-Config-Version")) {
+        headers.set("If-Match", '"' + latestConfigVersion + '"');
+        init = Object.assign({}, init, { headers: headers });
+      }
+      var response = await originalFetch(input, init);
+      observeResponseVersion(response);
+      handleConflictResponse(response);
+      return response;
+    };
 
-    if (response.status === 409) {
-      response.clone().json().then(function (body) {
-        if (body && body.error === "config_conflict") {
-          window.alert("配置文件已被其他操作修改，请刷新页面后再保存，避免覆盖最新配置。");
-        }
-      }).catch(function () {});
+    if (guarded) {
+      return enqueueWrite(send);
     }
-    return response;
+    return send();
   };
 
   if (window.XMLHttpRequest) {
@@ -63,9 +92,10 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
     var originalSend = window.XMLHttpRequest.prototype.send;
     var originalSetRequestHeader = window.XMLHttpRequest.prototype.setRequestHeader;
 
-    window.XMLHttpRequest.prototype.open = function (method, url) {
+    window.XMLHttpRequest.prototype.open = function (method, url, async) {
       this.__cliproxyMethod = String(method || "GET").toUpperCase();
       this.__cliproxyPath = requestPath(url || "");
+      this.__cliproxyAsync = async !== false;
       this.__cliproxyHeaders = {};
       return originalOpen.apply(this, arguments);
     };
@@ -75,34 +105,56 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
       return originalSetRequestHeader.apply(this, arguments);
     };
 
-    window.XMLHttpRequest.prototype.send = function () {
-      var headers = this.__cliproxyHeaders || {};
-      if (latestConfigVersion && shouldGuard(this.__cliproxyMethod || "GET", this.__cliproxyPath || "") && !headers["if-match"] && !headers["x-config-version"]) {
-        originalSetRequestHeader.call(this, "If-Match", '"' + latestConfigVersion + '"');
-      }
-      this.addEventListener("loadend", function () {
+    function observeXHR(xhr, done) {
+      xhr.addEventListener("loadend", function () {
         var nextVersion = "";
-        try { nextVersion = this.getResponseHeader("X-Config-Version") || ""; } catch (_) {}
+        try { nextVersion = xhr.getResponseHeader("X-Config-Version") || ""; } catch (_) {}
         if (nextVersion) latestConfigVersion = nextVersion;
-        if (this.status === 409) {
+        if (xhr.status === 409) {
           try {
-            var body = JSON.parse(this.responseText || "{}");
+            var body = JSON.parse(xhr.responseText || "{}");
+            if (body && body["current-version"]) latestConfigVersion = body["current-version"];
             if (body && body.error === "config_conflict") {
-              window.alert("配置文件已被其他操作修改，请刷新页面后再保存，避免覆盖最新配置。");
+              showConflictAlertOnce();
             }
           } catch (_) {}
         }
+        if (done) done();
       });
-      return originalSend.apply(this, arguments);
+    }
+
+    function attachXHRVersionHeader(xhr) {
+      var headers = xhr.__cliproxyHeaders || {};
+      if (latestConfigVersion && !headers["if-match"] && !headers["x-config-version"]) {
+        originalSetRequestHeader.call(xhr, "If-Match", '"' + latestConfigVersion + '"');
+      }
+    }
+
+    window.XMLHttpRequest.prototype.send = function () {
+      var xhr = this;
+      var args = arguments;
+      var guarded = shouldGuard(xhr.__cliproxyMethod || "GET", xhr.__cliproxyPath || "");
+      if (!guarded || xhr.__cliproxyAsync === false) {
+        if (guarded) attachXHRVersionHeader(xhr);
+        observeXHR(xhr);
+        return originalSend.apply(xhr, args);
+      }
+
+      enqueueWrite(function () {
+        return new Promise(function (resolve) {
+          attachXHRVersionHeader(xhr);
+          observeXHR(xhr, resolve);
+          originalSend.apply(xhr, args);
+        });
+      });
+      return undefined;
     };
   }
 })();
 </script>`)
 
 func injectManagementConfigVersionGuard(data []byte) []byte {
-	if bytes.Contains(data, []byte("cliproxy-config-version-guard")) {
-		return data
-	}
+	data = removeManagementConfigVersionGuard(data)
 	lower := bytes.ToLower(data)
 	if idx := bytes.LastIndex(lower, []byte("</body>")); idx >= 0 {
 		out := make([]byte, 0, len(data)+len(managementConfigVersionGuardScript))
@@ -114,6 +166,23 @@ func injectManagementConfigVersionGuard(data []byte) []byte {
 	out := make([]byte, 0, len(data)+len(managementConfigVersionGuardScript))
 	out = append(out, data...)
 	out = append(out, managementConfigVersionGuardScript...)
+	return out
+}
+
+func removeManagementConfigVersionGuard(data []byte) []byte {
+	start := bytes.Index(data, []byte(`<script id="cliproxy-config-version-guard">`))
+	if start < 0 {
+		return data
+	}
+	remaining := data[start:]
+	endRel := bytes.Index(bytes.ToLower(remaining), []byte("</script>"))
+	if endRel < 0 {
+		return data
+	}
+	end := start + endRel + len("</script>")
+	out := make([]byte, 0, len(data)-(end-start))
+	out = append(out, data[:start]...)
+	out = append(out, data[end:]...)
 	return out
 }
 
