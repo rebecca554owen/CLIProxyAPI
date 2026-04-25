@@ -1108,9 +1108,26 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
-	// Update disabled state
-	targetAuth.Disabled = *req.Disabled
-	if *req.Disabled {
+	disabled := *req.Disabled
+	if isConfigBackedAuth(targetAuth) && h.cfg != nil {
+		h.mu.Lock()
+		changed := h.setConfigBackedAuthDisabledStateLocked(targetAuth, disabled)
+		if changed {
+			_, newSnap, ok := h.persistCurrentConfigLocked(c, "auth-status")
+			h.mu.Unlock()
+			if !ok {
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": disabled, "config-version": configVersionFromSnapshot(newSnap)})
+			return
+		}
+		h.mu.Unlock()
+	}
+
+	// Update disabled state for runtime/file-backed auths, or no-op config-backed
+	// auths whose persisted state already matches the requested value.
+	targetAuth.Disabled = disabled
+	if disabled {
 		targetAuth.Status = coreauth.StatusDisabled
 		targetAuth.StatusMessage = "disabled via management API"
 	} else {
@@ -1124,15 +1141,8 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
-	// For config-based auths (Metadata == nil), persist the disabled state to the config file
-	// so it survives config reloads and server restarts.
-	if targetAuth.Metadata == nil && h.cfg != nil {
-		if persistErr := h.persistDisabledStateToConfig(targetAuth, *req.Disabled); persistErr != nil {
-			log.WithError(persistErr).Warnf("failed to persist disabled state to config for auth %s", targetAuth.ID)
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
+	h.setConfigVersionHeaders(c)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": disabled})
 }
 
 // PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
@@ -1330,50 +1340,69 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// persistDisabledStateToConfig updates the disabled field in the config file for config-based auths.
-// This ensures the disabled state survives config reloads and server restarts.
-func (h *Handler) persistDisabledStateToConfig(auth *coreauth.Auth, disabled bool) error {
+// setConfigBackedAuthDisabledStateLocked updates the disabled field in memory for config-backed auths.
+// The caller must hold h.mu and persist the config after this returns true.
+func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, disabled bool) bool {
 	if auth == nil || auth.Attributes == nil || h.cfg == nil {
-		return nil
+		return false
 	}
 	source := strings.TrimSpace(auth.Attributes["source"])
 	if !strings.HasPrefix(source, "config:") {
-		return nil
+		return false
 	}
 	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	authBaseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	matchesKeyAndBaseURL := func(entryKey, entryBaseURL string) bool {
+		if strings.TrimSpace(entryKey) != apiKey {
+			return false
+		}
+		entryBaseURL = strings.TrimSpace(entryBaseURL)
+		if authBaseURL != "" {
+			return entryBaseURL == authBaseURL
+		}
+		return entryBaseURL == ""
+	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	changed := false
 
 	switch provider {
 	case "gemini":
 		for i := range h.cfg.GeminiKey {
-			if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) == apiKey {
-				h.cfg.GeminiKey[i].Disabled = disabled
-				changed = true
+			if matchesKeyAndBaseURL(h.cfg.GeminiKey[i].APIKey, h.cfg.GeminiKey[i].BaseURL) {
+				if h.cfg.GeminiKey[i].Disabled != disabled {
+					h.cfg.GeminiKey[i].Disabled = disabled
+					changed = true
+				}
 				break
 			}
 		}
 	case "claude":
 		for i := range h.cfg.ClaudeKey {
-			if strings.TrimSpace(h.cfg.ClaudeKey[i].APIKey) == apiKey {
-				h.cfg.ClaudeKey[i].Disabled = disabled
-				changed = true
+			if matchesKeyAndBaseURL(h.cfg.ClaudeKey[i].APIKey, h.cfg.ClaudeKey[i].BaseURL) {
+				if h.cfg.ClaudeKey[i].Disabled != disabled {
+					h.cfg.ClaudeKey[i].Disabled = disabled
+					changed = true
+				}
 				break
 			}
 		}
 	case "codex":
 		for i := range h.cfg.CodexKey {
-			if strings.TrimSpace(h.cfg.CodexKey[i].APIKey) == apiKey {
-				h.cfg.CodexKey[i].Disabled = disabled
-				changed = true
+			if matchesKeyAndBaseURL(h.cfg.CodexKey[i].APIKey, h.cfg.CodexKey[i].BaseURL) {
+				if h.cfg.CodexKey[i].Disabled != disabled {
+					h.cfg.CodexKey[i].Disabled = disabled
+					changed = true
+				}
 				break
 			}
 		}
 	case "vertex":
 		for i := range h.cfg.VertexCompatAPIKey {
-			if strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].APIKey) == apiKey {
-				h.cfg.VertexCompatAPIKey[i].Disabled = disabled
-				changed = true
+			if matchesKeyAndBaseURL(h.cfg.VertexCompatAPIKey[i].APIKey, h.cfg.VertexCompatAPIKey[i].BaseURL) {
+				if h.cfg.VertexCompatAPIKey[i].Disabled != disabled {
+					h.cfg.VertexCompatAPIKey[i].Disabled = disabled
+					changed = true
+				}
 				break
 			}
 		}
@@ -1388,8 +1417,10 @@ func (h *Handler) persistDisabledStateToConfig(auth *coreauth.Auth, disabled boo
 			for j := range h.cfg.OpenAICompatibility[i].APIKeyEntries {
 				entry := &h.cfg.OpenAICompatibility[i].APIKeyEntries[j]
 				if strings.TrimSpace(entry.APIKey) == apiKey && strings.TrimSpace(entry.ProxyURL) == proxyURL {
-					entry.Disabled = disabled
-					changed = true
+					if entry.Disabled != disabled {
+						entry.Disabled = disabled
+						changed = true
+					}
 					break
 				}
 			}
@@ -1399,10 +1430,7 @@ func (h *Handler) persistDisabledStateToConfig(auth *coreauth.Auth, disabled boo
 		}
 	}
 
-	if !changed {
-		return nil
-	}
-	return h.persistConfig()
+	return changed
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {

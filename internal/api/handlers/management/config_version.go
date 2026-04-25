@@ -81,6 +81,7 @@ func setConfigSnapshotHeaders(c *gin.Context, snap configSnapshot) {
 	}
 	c.Header(configVersionHeader, snap.version)
 	c.Header(configETagHeader, configETag(snap.version))
+	c.Header("Cache-Control", "no-store")
 	if snap.info != nil {
 		c.Header("Last-Modified", snap.info.ModTime().UTC().Format(http.TimeFormat))
 	}

@@ -263,6 +263,8 @@ func setManagementConfigVersionHeaders(c *gin.Context, version string, info os.F
 	}
 	c.Header("X-Config-Version", version)
 	c.Header("ETag", `"`+version+`"`)
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
 	if info != nil {
 		c.Header("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
 	}

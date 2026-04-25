@@ -299,17 +299,6 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	return true, 0, ""
 }
 
-// persistConfig saves the current in-memory config to disk without writing an HTTP response.
-func (h *Handler) persistConfig() error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		return err
-	}
-	h.syncRuntimeConfigLocked(context.Background())
-	return nil
-}
-
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
@@ -320,24 +309,41 @@ func (h *Handler) persist(c *gin.Context) bool {
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
-	oldSnap, ok := h.checkConfigWritePreconditionLocked(c)
+	_, newSnap, ok := h.persistCurrentConfigLocked(c, "structured")
 	if !ok {
 		return false
 	}
+	if c != nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": configVersionFromSnapshot(newSnap)})
+	}
+	return true
+}
+
+func (h *Handler) persistCurrentConfigLocked(c *gin.Context, action string) (configSnapshot, configSnapshot, bool) {
+	if strings.TrimSpace(action) == "" {
+		action = "structured"
+	}
+	oldSnap, ok := h.checkConfigWritePreconditionLocked(c)
+	if !ok {
+		return oldSnap, configSnapshot{}, false
+	}
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
-		return false
+		if c != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		} else {
+			log.WithError(err).Error("failed to save config")
+		}
+		return oldSnap, configSnapshot{}, false
 	}
 	newSnap := h.snapshotAfterConfigWrite(c)
-	h.auditConfigWrite(c, "structured", configVersionFromSnapshot(oldSnap), configVersionFromSnapshot(newSnap), len(oldSnap.data), len(newSnap.data), configWritePrecondition(c) != "")
+	h.auditConfigWrite(c, action, configVersionFromSnapshot(oldSnap), configVersionFromSnapshot(newSnap), len(oldSnap.data), len(newSnap.data), configWritePrecondition(c) != "")
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
 	}
 	h.syncRuntimeConfigLocked(ctx)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": configVersionFromSnapshot(newSnap)})
-	return true
+	return oldSnap, newSnap, true
 }
 
 func isConfigBackedAuth(auth *coreauth.Auth) bool {
