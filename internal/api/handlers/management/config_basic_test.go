@@ -154,6 +154,22 @@ func TestPutConfigYAMLRejectsStaleVersion(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("PutConfigYAML status = %d, want %d with body %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode conflict response: %v", err)
+	}
+	if got := resp["error"]; got != "config_conflict" {
+		t.Fatalf("conflict error = %v, want config_conflict", got)
+	}
+	if got := resp["current-version"]; got == "" {
+		t.Fatalf("expected current-version in conflict response: %#v", resp)
+	}
+	if got := resp["submitted-version"]; got != "sha256:stale" {
+		t.Fatalf("submitted-version = %v, want sha256:stale", got)
+	}
+	if got := rec.Header().Get(configVersionHeader); got == "" {
+		t.Fatalf("expected %s response header on conflict", configVersionHeader)
+	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("failed to read config file: %v", err)

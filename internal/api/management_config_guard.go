@@ -2,21 +2,41 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
-var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-version-guard">
+func managementConfigVersionGuardScript(initialVersion string) []byte {
+	initialVersionJSON, err := json.Marshal(strings.TrimSpace(initialVersion))
+	if err != nil {
+		initialVersionJSON = []byte(`""`)
+	}
+	return []byte(`<script id="cliproxy-config-version-guard">
 (function () {
   if (window.__cliproxyConfigVersionGuard) return;
   window.__cliproxyConfigVersionGuard = true;
-  var latestConfigVersion = "";
+  var latestConfigVersion = ` + string(initialVersionJSON) + `;
+  var lastConflictVersion = "";
   var writeQueue = Promise.resolve();
   var conflictAlertVisible = false;
+  var lastConflictAlertAt = 0;
   var originalFetch = window.fetch ? window.fetch.bind(window) : null;
   if (!originalFetch) return;
+  window.__cliproxyLatestConfigVersion = latestConfigVersion;
+
+  function setLatestConfigVersion(version) {
+    version = String(version || "").trim();
+    if (!version) return;
+    latestConfigVersion = version;
+    window.__cliproxyLatestConfigVersion = latestConfigVersion;
+  }
 
   function requestPath(input) {
     try {
@@ -37,22 +57,53 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
   }
 
   function observeResponseVersion(response) {
+    if (response && response.status === 409) return;
     var nextVersion = response && response.headers && response.headers.get("X-Config-Version");
-    if (nextVersion) latestConfigVersion = nextVersion;
+    if (nextVersion) setLatestConfigVersion(nextVersion);
   }
 
-  function showConflictAlertOnce() {
+  function publishConflict(detail) {
+    window.__cliproxyConfigConflict = detail;
+    if (window.console && window.console.warn) {
+      window.console.warn("[CLIProxyAPI] management config write conflict", detail);
+    }
+    try {
+      window.dispatchEvent(new CustomEvent("cliproxy:config-conflict", { detail: detail }));
+    } catch (_) {}
+  }
+
+  function showConflictAlertOnce(detail) {
+    var now = Date.now ? Date.now() : new Date().getTime();
+    var signature = detail && (detail.currentVersion || detail.submittedVersion || detail.path || "");
     if (conflictAlertVisible) return;
+    if (lastConflictVersion === signature && now - lastConflictAlertAt < 10000) return;
+    lastConflictVersion = signature;
+    lastConflictAlertAt = now;
     conflictAlertVisible = true;
-    window.alert("配置文件已被其他操作修改，请刷新页面后再保存，避免覆盖最新配置。");
+    window.alert("配置文件刚刚被另一个保存动作更新了。\n\n这次保存已被拦截，没有覆盖线上配置。请刷新页面确认最新内容后再保存。");
     window.setTimeout(function () { conflictAlertVisible = false; }, 1000);
+  }
+
+  function handleConflictBody(body, source) {
+    if (!body || body.error !== "config_conflict") return;
+    var detail = {
+      source: source || "",
+      message: body.message || "",
+      currentVersion: body["current-version"] || "",
+      submittedVersion: body["submitted-version"] || "",
+      lastModified: body["last-modified"] || "",
+      method: body.method || "",
+      route: body.route || "",
+      path: body.path || ""
+    };
+    publishConflict(detail);
+    showConflictAlertOnce(detail);
   }
 
   function handleConflictResponse(response) {
     if (!response || response.status !== 409) return;
     response.clone().json().then(function (body) {
-      if (body && body["current-version"]) latestConfigVersion = body["current-version"];
-      if (body && body.error === "config_conflict") showConflictAlertOnce();
+      handleConflictBody(body, "fetch");
     }).catch(function () {});
   }
 
@@ -109,14 +160,11 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
       xhr.addEventListener("loadend", function () {
         var nextVersion = "";
         try { nextVersion = xhr.getResponseHeader("X-Config-Version") || ""; } catch (_) {}
-        if (nextVersion) latestConfigVersion = nextVersion;
+        if (nextVersion && xhr.status !== 409) setLatestConfigVersion(nextVersion);
         if (xhr.status === 409) {
           try {
             var body = JSON.parse(xhr.responseText || "{}");
-            if (body && body["current-version"]) latestConfigVersion = body["current-version"];
-            if (body && body.error === "config_conflict") {
-              showConflictAlertOnce();
-            }
+            handleConflictBody(body, "xhr");
           } catch (_) {}
         }
         if (done) done();
@@ -152,20 +200,26 @@ var managementConfigVersionGuardScript = []byte(`<script id="cliproxy-config-ver
   }
 })();
 </script>`)
+}
 
-func injectManagementConfigVersionGuard(data []byte) []byte {
+func injectManagementConfigVersionGuard(data []byte, initialVersion ...string) []byte {
+	version := ""
+	if len(initialVersion) > 0 {
+		version = initialVersion[0]
+	}
+	guardScript := managementConfigVersionGuardScript(version)
 	data = removeManagementConfigVersionGuard(data)
 	lower := bytes.ToLower(data)
 	if idx := bytes.LastIndex(lower, []byte("</body>")); idx >= 0 {
-		out := make([]byte, 0, len(data)+len(managementConfigVersionGuardScript))
+		out := make([]byte, 0, len(data)+len(guardScript))
 		out = append(out, data[:idx]...)
-		out = append(out, managementConfigVersionGuardScript...)
+		out = append(out, guardScript...)
 		out = append(out, data[idx:]...)
 		return out
 	}
-	out := make([]byte, 0, len(data)+len(managementConfigVersionGuardScript))
+	out := make([]byte, 0, len(data)+len(guardScript))
 	out = append(out, data...)
-	out = append(out, managementConfigVersionGuardScript...)
+	out = append(out, guardScript...)
 	return out
 }
 
@@ -186,11 +240,45 @@ func removeManagementConfigVersionGuard(data []byte) []byte {
 	return out
 }
 
-func serveManagementControlPanelFile(c *gin.Context, filePath string) {
+func managementConfigVersionFromFile(path string) (string, os.FileInfo, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, err
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum[:]), info, nil
+}
+
+func setManagementConfigVersionHeaders(c *gin.Context, version string, info os.FileInfo) {
+	version = strings.TrimSpace(version)
+	if c == nil || version == "" {
+		return
+	}
+	c.Header("X-Config-Version", version)
+	c.Header("ETag", `"`+version+`"`)
+	if info != nil {
+		c.Header("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+	}
+}
+
+func serveManagementControlPanelFile(c *gin.Context, filePath, configFilePath string) {
+	version, info, errVersion := managementConfigVersionFromFile(configFilePath)
+	if errVersion != nil {
+		log.WithError(errVersion).Debug("failed to read config snapshot for management page guard")
+	}
+	setManagementConfigVersionHeaders(c, version, info)
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		c.File(filePath)
 		return
 	}
-	c.Data(http.StatusOK, "text/html; charset=utf-8", injectManagementConfigVersionGuard(data))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", injectManagementConfigVersionGuard(data, version))
 }

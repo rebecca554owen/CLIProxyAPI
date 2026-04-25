@@ -52,15 +52,18 @@ func newTestServer(t *testing.T) *Server {
 func TestInjectManagementConfigVersionGuard(t *testing.T) {
 	html := []byte("<html><body><main>ok</main></body></html>")
 
-	out := injectManagementConfigVersionGuard(html)
+	out := injectManagementConfigVersionGuard(html, "sha256:test-version")
 
 	if !strings.Contains(string(out), "cliproxy-config-version-guard") {
 		t.Fatalf("expected injected guard script, got %s", string(out))
 	}
+	if !strings.Contains(string(out), `var latestConfigVersion = "sha256:test-version"`) {
+		t.Fatalf("expected initial config version in guard script: %s", string(out))
+	}
 	if strings.Index(string(out), "cliproxy-config-version-guard") > strings.Index(string(out), "</body>") {
 		t.Fatalf("guard script should be injected before closing body: %s", string(out))
 	}
-	again := injectManagementConfigVersionGuard(out)
+	again := injectManagementConfigVersionGuard(out, "sha256:test-version")
 	if string(again) != string(out) {
 		t.Fatalf("guard injection should be idempotent")
 	}
@@ -80,6 +83,12 @@ func TestInjectManagementConfigVersionGuardReplacesOldGuard(t *testing.T) {
 	}
 	if !strings.Contains(body, "writeQueue") {
 		t.Fatalf("expected serialized write queue in guard script: %s", body)
+	}
+	if !strings.Contains(body, "cliproxy:config-conflict") {
+		t.Fatalf("expected conflict event publishing in guard script: %s", body)
+	}
+	if !strings.Contains(body, "response && response.status === 409") {
+		t.Fatalf("expected guard to avoid promoting conflict versions to writable versions: %s", body)
 	}
 }
 

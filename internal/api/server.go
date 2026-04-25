@@ -702,7 +702,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	serveManagementControlPanelFile(c, filePath)
+	serveManagementControlPanelFile(c, filePath, s.configFilePath)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

@@ -141,11 +141,30 @@ func (h *Handler) checkConfigWritePreconditionLocked(c *gin.Context) (configSnap
 
 	h.reloadConfigFromDiskLocked()
 	setConfigSnapshotHeaders(c, snap)
+	submittedVersion := normalizeConfigVersionToken(precondition)
+	conflictFields := log.Fields{
+		"path":              h.configFilePath,
+		"current_version":   snap.version,
+		"submitted_version": submittedVersion,
+		"last_modified":     configSnapshotLastModified(snap),
+	}
+	if c != nil && c.Request != nil {
+		conflictFields["method"] = c.Request.Method
+		conflictFields["route"] = c.FullPath()
+		conflictFields["client_ip"] = c.ClientIP()
+		conflictFields["user_agent"] = c.Request.UserAgent()
+	}
+	log.WithFields(conflictFields).Warn("management config write conflict")
 	h.auditConfigWrite(c, "conflict", snap.version, snap.version, len(snap.data), len(snap.data), true)
 	c.JSON(http.StatusConflict, gin.H{
-		"error":           "config_conflict",
-		"message":         "config.yaml changed after this page loaded; reload the latest config before saving",
-		"current-version": snap.version,
+		"error":             "config_conflict",
+		"message":           "config.yaml changed after this page loaded; reload the latest config before saving",
+		"current-version":   snap.version,
+		"submitted-version": submittedVersion,
+		"last-modified":     configSnapshotLastModified(snap),
+		"method":            conflictFields["method"],
+		"route":             conflictFields["route"],
+		"path":              h.configFilePath,
 	})
 	return snap, false
 }
@@ -191,4 +210,12 @@ func configSnapshotModTime(snap configSnapshot) time.Time {
 		return time.Time{}
 	}
 	return snap.info.ModTime()
+}
+
+func configSnapshotLastModified(snap configSnapshot) string {
+	modTime := configSnapshotModTime(snap)
+	if modTime.IsZero() {
+		return ""
+	}
+	return modTime.UTC().Format(http.TimeFormat)
 }
