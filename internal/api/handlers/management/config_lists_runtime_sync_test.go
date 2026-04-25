@@ -102,3 +102,64 @@ func TestPutCodexKeys_DisabledEntrySyncsRuntimeImmediately(t *testing.T) {
 		t.Fatal("expected Execute(disabled) to fail because runtime auth should be disabled immediately")
 	}
 }
+
+func TestPutClaudeKeys_DisabledEntrySyncsRuntimeImmediately(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("claude-api-key: []\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	cfg := &config.Config{
+		AuthDir: t.TempDir(),
+	}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(managementTestExecutor{id: "claude"})
+
+	h := NewHandler(cfg, configPath, manager)
+
+	put := func(body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodPut, "/v0/management/claude-api-key", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		ctx.Request = req
+		h.PutClaudeKeys(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT /claude-api-key status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	authID, _ := synthesizer.NewStableIDGenerator().Next("claude:apikey", "sk-test", "https://claude.example.com")
+
+	put(`[{"api-key":"sk-test","base-url":"https://claude.example.com","disabled":false}]`)
+
+	active, ok := manager.GetByID(authID)
+	if !ok || active == nil {
+		t.Fatalf("expected auth %s to be registered after enable", authID)
+	}
+	if active.Disabled || active.Status == coreauth.StatusDisabled {
+		t.Fatalf("expected auth active after enable, got disabled=%v status=%s", active.Disabled, active.Status)
+	}
+
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("Execute(enabled) error = %v", err)
+	}
+
+	put(`[{"api-key":"sk-test","base-url":"https://claude.example.com","disabled":true}]`)
+
+	disabled, ok := manager.GetByID(authID)
+	if !ok || disabled == nil {
+		t.Fatalf("expected auth %s to remain present after disable", authID)
+	}
+	if !disabled.Disabled || disabled.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected auth disabled after update, got disabled=%v status=%s", disabled.Disabled, disabled.Status)
+	}
+
+	if _, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err == nil {
+		t.Fatal("expected Execute(disabled) to fail because runtime auth should be disabled immediately")
+	}
+}
