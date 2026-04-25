@@ -141,19 +141,16 @@ func TestApplyHealthFailure_Repeated429OpensCircuit(t *testing.T) {
 	now := time.Now()
 	var health HealthState
 
-	applyHealthFailure(&health, now, 429)
-	if health.BreakerState != HealthBreakerClosed {
-		t.Fatalf("after first 429 BreakerState = %q, want %q", health.BreakerState, HealthBreakerClosed)
+	for attempt := 1; attempt < health429OpenFailures; attempt++ {
+		applyHealthFailure(&health, now.Add(time.Duration(attempt-1)*30*time.Second), 429)
+		if health.BreakerState != HealthBreakerClosed {
+			t.Fatalf("after %d 429s BreakerState = %q, want %q", attempt, health.BreakerState, HealthBreakerClosed)
+		}
 	}
 
-	applyHealthFailure(&health, now.Add(30*time.Second), 429)
-	if health.BreakerState != HealthBreakerClosed {
-		t.Fatalf("after second 429 BreakerState = %q, want %q", health.BreakerState, HealthBreakerClosed)
-	}
-
-	applyHealthFailure(&health, now.Add(time.Minute), 429)
+	applyHealthFailure(&health, now.Add(time.Duration(health429OpenFailures-1)*30*time.Second), 429)
 	if health.BreakerState != HealthBreakerOpen {
-		t.Fatalf("after third 429 BreakerState = %q, want %q", health.BreakerState, HealthBreakerOpen)
+		t.Fatalf("after %d 429s BreakerState = %q, want %q", health429OpenFailures, health.BreakerState, HealthBreakerOpen)
 	}
 	if health.OpenUntil.IsZero() || !health.OpenUntil.After(now) {
 		t.Fatalf("OpenUntil = %v, want future time", health.OpenUntil)
@@ -311,16 +308,19 @@ func TestManagerAvailableAuthsForRouteModel_AllCoolingUsesLowFrequencyProbe(t *t
 	}
 
 	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(healthHalfOpenActiveTTL+time.Second))
-	if err == nil {
-		t.Fatalf("availableAuthsForRouteModel(after active probe window) = %+v, want cooldown error before next probe interval", available)
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel(quota active probe window) error = %v", err)
+	}
+	if len(available) != 2 || available[0].ID != "a" || available[1].ID != "b" {
+		t.Fatalf("availableAuthsForRouteModel(quota active probe window) = %+v, want both quota probes", available)
 	}
 
-	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(healthHalfOpenInterval+time.Second))
+	available, err = manager.availableAuthsForRouteModel([]*Auth{authA, authB}, "claude", model, now.Add(quotaHalfOpenActiveTTL+time.Second))
 	if err != nil {
-		t.Fatalf("availableAuthsForRouteModel(next probe interval) error = %v", err)
+		t.Fatalf("availableAuthsForRouteModel(next quota probe interval) error = %v", err)
 	}
 	if len(available) != 1 || available[0].ID != "a" {
-		t.Fatalf("availableAuthsForRouteModel(next probe interval) = %+v, want auth a", available)
+		t.Fatalf("availableAuthsForRouteModel(next quota probe interval) = %+v, want auth a", available)
 	}
 }
 

@@ -265,59 +265,49 @@ func TestManager_MarkResult_429StaysSoftBeforeRepeatedQuotaFailures(t *testing.T
 		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
 	}
 
-	m.MarkResult(context.Background(), result)
-	updated, ok := m.GetByID(auth.ID)
-	if !ok {
-		t.Fatal("auth not found after first 429")
-	}
-	state := updated.ModelStates[model]
-	if state == nil {
-		t.Fatal("model state not found after first 429")
-	}
-	if !state.NextRetryAfter.IsZero() {
-		t.Fatalf("first 429 cooldown = %v, want zero", state.NextRetryAfter)
-	}
-	if !state.Quota.Exceeded {
-		t.Fatal("first 429 should mark quota pressure")
-	}
-	if got := state.Health.ConsecutiveFailures; got != 1 {
-		t.Fatalf("first 429 consecutive failures = %d, want 1", got)
-	}
-
-	m.MarkResult(context.Background(), result)
-	updated, ok = m.GetByID(auth.ID)
-	if !ok {
-		t.Fatal("auth not found after second 429")
-	}
-	state = updated.ModelStates[model]
-	if state == nil {
-		t.Fatal("model state not found after second 429")
-	}
-	if !state.NextRetryAfter.IsZero() {
-		t.Fatalf("second 429 cooldown = %v, want zero", state.NextRetryAfter)
-	}
-	if got := state.Health.ConsecutiveFailures; got != 2 {
-		t.Fatalf("second 429 consecutive failures = %d, want 2", got)
+	var updated *Auth
+	var state *ModelState
+	for attempt := 1; attempt < quotaHardCooldownFailures; attempt++ {
+		m.MarkResult(context.Background(), result)
+		var ok bool
+		updated, ok = m.GetByID(auth.ID)
+		if !ok {
+			t.Fatalf("auth not found after %d 429s", attempt)
+		}
+		state = updated.ModelStates[model]
+		if state == nil {
+			t.Fatalf("model state not found after %d 429s", attempt)
+		}
+		if !state.NextRetryAfter.IsZero() {
+			t.Fatalf("%d 429s cooldown = %v, want zero", attempt, state.NextRetryAfter)
+		}
+		if !state.Quota.Exceeded {
+			t.Fatalf("%d 429s should mark quota pressure", attempt)
+		}
+		if got := state.Health.ConsecutiveFailures; got != attempt {
+			t.Fatalf("%d 429s consecutive failures = %d, want %d", attempt, got, attempt)
+		}
 	}
 
 	before := time.Now()
 	m.MarkResult(context.Background(), result)
 	after := time.Now()
-	updated, ok = m.GetByID(auth.ID)
+	updated, ok := m.GetByID(auth.ID)
 	if !ok {
-		t.Fatal("auth not found after third 429")
+		t.Fatalf("auth not found after %d 429s", quotaHardCooldownFailures)
 	}
 	state = updated.ModelStates[model]
 	if state == nil {
-		t.Fatal("model state not found after third 429")
+		t.Fatalf("model state not found after %d 429s", quotaHardCooldownFailures)
 	}
 	if state.NextRetryAfter.IsZero() {
-		t.Fatal("expected third 429 to set hard cooldown")
+		t.Fatalf("expected %d 429s to set hard cooldown", quotaHardCooldownFailures)
 	}
-	minExpected := before.Add(85 * time.Second)
-	maxExpected := after.Add(95 * time.Second)
+	expectedCooldown := healthOpenCooldown(http.StatusTooManyRequests, quotaHardCooldownFailures)
+	minExpected := before.Add(expectedCooldown - 5*time.Second)
+	maxExpected := after.Add(expectedCooldown + 5*time.Second)
 	if state.NextRetryAfter.Before(minExpected) || state.NextRetryAfter.After(maxExpected) {
-		t.Fatalf("third 429 cooldown = %v, want within [%v, %v]", state.NextRetryAfter, minExpected, maxExpected)
+		t.Fatalf("%d 429s cooldown = %v, want within [%v, %v]", quotaHardCooldownFailures, state.NextRetryAfter, minExpected, maxExpected)
 	}
 }
 

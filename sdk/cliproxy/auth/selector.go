@@ -164,7 +164,9 @@ const (
 	healthHalfOpenSuccesses  = 2
 	healthHalfOpenInterval   = 20 * time.Second
 	healthHalfOpenActiveTTL  = 5 * time.Second
-	health429OpenFailures    = 3
+	quotaHalfOpenInterval    = 5 * time.Second
+	quotaHalfOpenActiveTTL   = 15 * time.Second
+	health429OpenFailures    = 8
 
 	spreadLoadHalfLife          = 20 * time.Second
 	spreadLoadInflightWeight    = 4

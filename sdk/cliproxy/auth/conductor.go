@@ -679,6 +679,7 @@ type cooldownFallbackCandidate struct {
 	model    string
 	next     time.Time
 	priority int
+	quota    bool
 }
 
 func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
@@ -712,7 +713,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		priority := effectiveSelectionPriority(candidate, checkModel, now)
 		availableByPriority[priority] = append(availableByPriority[priority], candidate)
 	}
-	recordTemporalBlock := func(candidate *Auth, checkModel string, next time.Time) {
+	recordTemporalBlock := func(candidate *Auth, checkModel string, next time.Time, quota bool) {
 		cooldownCount++
 		if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
@@ -722,6 +723,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			model:    checkModel,
 			next:     next,
 			priority: effectiveSelectionPriority(candidate, checkModel, now),
+			quota:    quota,
 		})
 	}
 	for _, candidate := range auths {
@@ -735,7 +737,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			}
 			healthBlocked, healthNext := m.healthSelectionBlocked(candidate, checkModel, now)
 			if healthBlocked {
-				recordTemporalBlock(candidate, checkModel, healthNext)
+				recordTemporalBlock(candidate, checkModel, healthNext, quotaCooldownForModel(candidate, checkModel))
 				continue
 			}
 			recordAvailable(candidate, checkModel)
@@ -747,7 +749,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 				recordAvailable(candidate, checkModel)
 				continue
 			}
-			recordTemporalBlock(candidate, checkModel, next)
+			recordTemporalBlock(candidate, checkModel, next, reason == blockReasonCooldown)
 		}
 	}
 
@@ -849,7 +851,11 @@ func (m *Manager) cooldownFallbackProbe(candidates []cooldownFallbackCandidate, 
 		if candidate.auth == nil {
 			continue
 		}
-		ok, next := m.reserveHalfOpenProbe(candidate.auth.ID, candidate.model, now)
+		interval, activeTTL := healthHalfOpenInterval, healthHalfOpenActiveTTL
+		if candidate.quota {
+			interval, activeTTL = quotaHalfOpenInterval, quotaHalfOpenActiveTTL
+		}
+		ok, next := m.reserveHalfOpenProbeWithWindow(candidate.auth.ID, candidate.model, now, interval, activeTTL)
 		if ok {
 			fallback := candidate
 			return &fallback, time.Time{}
@@ -859,6 +865,25 @@ func (m *Manager) cooldownFallbackProbe(candidates []cooldownFallbackCandidate, 
 		}
 	}
 	return nil, probeNext
+}
+
+func quotaCooldownForModel(auth *Auth, model string) bool {
+	if auth == nil {
+		return false
+	}
+	if model != "" && len(auth.ModelStates) > 0 {
+		state, ok := auth.ModelStates[model]
+		if (!ok || state == nil) && model != "" {
+			baseModel := canonicalModelKey(model)
+			if baseModel != "" && baseModel != model {
+				state, ok = auth.ModelStates[baseModel]
+			}
+		}
+		if ok && state != nil {
+			return state.Quota.Exceeded
+		}
+	}
+	return auth.Quota.Exceeded
 }
 
 func copyTriedMap(src map[string]struct{}) map[string]struct{} {
@@ -899,8 +924,18 @@ func (m *Manager) nextHalfOpenProbeAt(authID, model string) time.Time {
 }
 
 func (m *Manager) reserveHalfOpenProbe(authID, model string, now time.Time) (bool, time.Time) {
+	return m.reserveHalfOpenProbeWithWindow(authID, model, now, healthHalfOpenInterval, healthHalfOpenActiveTTL)
+}
+
+func (m *Manager) reserveHalfOpenProbeWithWindow(authID, model string, now time.Time, interval, activeTTL time.Duration) (bool, time.Time) {
 	if m == nil {
 		return true, time.Time{}
+	}
+	if interval <= 0 {
+		interval = healthHalfOpenInterval
+	}
+	if activeTTL <= 0 {
+		activeTTL = healthHalfOpenActiveTTL
 	}
 	key := halfOpenProbeKey(authID, model)
 	if key == "\x00" {
@@ -911,12 +946,12 @@ func (m *Manager) reserveHalfOpenProbe(authID, model string, now time.Time) (boo
 	if next := m.halfOpenProbeNext[key]; !next.IsZero() && next.After(now) {
 		return false, next
 	}
-	next := now.Add(healthHalfOpenInterval)
+	next := now.Add(interval)
 	m.halfOpenProbeNext[key] = next
 	if m.halfOpenProbeActiveUntil == nil {
 		m.halfOpenProbeActiveUntil = make(map[string]time.Time)
 	}
-	m.halfOpenProbeActiveUntil[key] = now.Add(healthHalfOpenActiveTTL)
+	m.halfOpenProbeActiveUntil[key] = now.Add(activeTTL)
 	return true, next
 }
 
@@ -3270,7 +3305,7 @@ func healthFailurePenalty(statusCode, consecutiveFailures int) int {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
 		penalty = 35
 	case http.StatusTooManyRequests:
-		penalty = 30
+		penalty = 20
 	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
 		penalty = 20
 	default:
@@ -3329,7 +3364,7 @@ func healthOpenCooldown(statusCode, consecutiveFailures int) time.Duration {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
 		return 10 * time.Minute
 	case http.StatusTooManyRequests:
-		return time.Duration(minInt(4, consecutiveFailures)) * 30 * time.Second
+		return time.Duration(minInt(3, consecutiveFailures)) * 15 * time.Second
 	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
 		return time.Duration(minInt(4, consecutiveFailures)) * 30 * time.Second
 	default:
