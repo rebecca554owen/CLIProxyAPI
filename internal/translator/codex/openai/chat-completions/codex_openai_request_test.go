@@ -702,6 +702,42 @@ func TestStructuredOutputAndToolsSchemasAreCleaned(t *testing.T) {
 	if gjson.Get(result, "tools.0.parameters.required").Exists() {
 		t.Fatalf("tool required should be removed when null: %s", result)
 	}
+	if got := gjson.Get(result, "tools.0.strict"); !got.Exists() || got.Bool() {
+		t.Fatalf("tool strict should default to false: %s", result)
+	}
+}
+
+func TestChatCompletionsFunctionToolStrictFlagIsPreserved(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Hi"}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "office_lookup",
+					"description": "Look up Office document context",
+					"strict": true,
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"documentId": {"type": "string"}
+						},
+						"required": ["documentId"]
+					}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	if got := gjson.Get(result, "tools.0.strict"); !got.Exists() || !got.Bool() {
+		t.Fatalf("explicit tool strict=true should be preserved: %s", result)
+	}
 }
 
 func TestNormalizeClaudeStyleToolBlocksInChatMessages(t *testing.T) {
