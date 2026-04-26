@@ -577,6 +577,10 @@ func newUnauthorizedEvictionTestManager(t *testing.T) (*Manager, *authFallbackEx
 	const badAuthID = "aa-bad-auth"
 	const goodAuthID = "bb-good-auth"
 
+	prev := deleteUnauthorizedAuthEnabled.Load()
+	SetDeleteUnauthorizedAuth(true)
+	t.Cleanup(func() { SetDeleteUnauthorizedAuth(prev) })
+
 	store := &deleteTrackingStore{}
 	selector := &SequentialFillSelector{
 		current: map[string]string{
@@ -860,6 +864,31 @@ func TestManager_ExecuteStream_PinnedUnauthorizedBootstrapReturnsStreamError(t *
 		t.Fatalf("stream calls = %v, want [%s]", gotCalls, badAuthID)
 	}
 	assertUnauthorizedAuthEvicted(t, manager, store, badAuthID)
+}
+
+// When delete-unauthorized-auth is disabled (the default), a 401 must still
+// route to the next credential but must NOT evict the bad auth from memory or
+// delete it from the store. Cooldown via MarkResult is unaffected.
+func TestManager_Execute_UnauthorizedAuth_DeleteDisabled_KeepsAuth(t *testing.T) {
+	manager, executor, store, model, badAuthID, goodAuthID := newUnauthorizedEvictionTestManager(t)
+	SetDeleteUnauthorizedAuth(false)
+
+	resp, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuthID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuthID)
+	}
+	if gotCalls := executor.ExecuteCalls(); len(gotCalls) != 2 || gotCalls[0] != badAuthID || gotCalls[1] != goodAuthID {
+		t.Fatalf("execute calls = %v, want [%s %s]", gotCalls, badAuthID, goodAuthID)
+	}
+	if _, ok := manager.GetByID(badAuthID); !ok {
+		t.Fatalf("expected unauthorized auth %q to remain registered when delete-unauthorized-auth=false", badAuthID)
+	}
+	if deleted := store.DeletedIDs(); len(deleted) != 0 {
+		t.Fatalf("store.Delete should not be called when delete-unauthorized-auth=false, got %v", deleted)
+	}
 }
 
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {

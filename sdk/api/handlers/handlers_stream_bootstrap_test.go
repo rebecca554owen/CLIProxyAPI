@@ -520,8 +520,8 @@ func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError
 	if !errors.As(gotErr.Error, &authErr) || authErr == nil {
 		t.Fatalf("expected coreauth.Error, got %T", gotErr.Error)
 	}
-	if authErr.Code != "auth_not_found" {
-		t.Fatalf("code = %q, want %q", authErr.Code, "auth_not_found")
+	if authErr.Code != "auth_not_found" && authErr.Code != "auth_unavailable" {
+		t.Fatalf("code = %q, want auth_not_found or auth_unavailable", authErr.Code)
 	}
 	if authErr.Message != "requested route is temporarily unavailable" {
 		t.Fatalf("message = %q, want %q", authErr.Message, "requested route is temporarily unavailable")

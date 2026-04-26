@@ -77,6 +77,12 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// DeleteUnauthorizedAuth controls whether to delete credentials on 401 responses.
+	// When false (default), 401 only marks the auth as unauthorized and cools it down
+	// via existing MarkResult logic, but keeps the auth in memory and on disk.
+	// When true, the auth is evicted from memory and removed from the store.
+	DeleteUnauthorizedAuth bool `yaml:"delete-unauthorized-auth" json:"delete-unauthorized-auth"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
@@ -712,6 +718,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.UsageRetentionDays = 30
 	cfg.DisableCooling = false
+	cfg.DeleteUnauthorizedAuth = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient

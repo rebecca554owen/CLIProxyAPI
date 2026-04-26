@@ -83,6 +83,16 @@ func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
 
+var deleteUnauthorizedAuthEnabled atomic.Bool
+
+// SetDeleteUnauthorizedAuth toggles whether a 401 response should evict the auth
+// from memory and delete it from the underlying store. When false (default), a
+// 401 only marks the auth as unauthorized and cools it down (see MarkResult),
+// but the auth record is preserved.
+func SetDeleteUnauthorizedAuth(enable bool) {
+	deleteUnauthorizedAuthEnabled.Store(enable)
+}
+
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
 	if auth != nil {
 		if override, ok := auth.DisableCoolingOverride(); ok {
@@ -3871,6 +3881,14 @@ func (m *Manager) evictUnauthorizedAuth(ctx context.Context, auth *Auth, provide
 	model = strings.TrimSpace(model)
 
 	entry := logEntryWithRequestID(ctx)
+	if !deleteUnauthorizedAuthEnabled.Load() {
+		if model != "" {
+			entry.Infof("skip evicting unauthorized auth provider=%s auth=%s model=%s (delete-unauthorized-auth=false)", provider, auth.ID, model)
+		} else {
+			entry.Infof("skip evicting unauthorized auth provider=%s auth=%s (delete-unauthorized-auth=false)", provider, auth.ID)
+		}
+		return nil
+	}
 	if model != "" {
 		entry.Infof("evicting unauthorized auth provider=%s auth=%s model=%s due to 401", provider, auth.ID, model)
 	} else {
