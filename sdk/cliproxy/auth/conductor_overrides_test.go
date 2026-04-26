@@ -355,6 +355,74 @@ func TestManager_MarkResult_429ModerateRetryAfterDoesNotHardCooldownImmediately(
 	}
 }
 
+func TestManager_MarkResult_KimiBillingCycleQuotaBlocksEntireAuth(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "kimi-billing-cycle-quota-auth",
+		Provider: "kimi",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "kimi-k2.6"
+	message := "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. Upgrade to get more: https://www.kimi.com/code/console?from=quota-upgrade"
+	before := time.Now()
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: message},
+	})
+	after := time.Now()
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after billing cycle quota failure")
+	}
+	if !updated.Unavailable {
+		t.Fatal("auth should be unavailable after billing cycle quota failure")
+	}
+	if updated.Status != StatusError {
+		t.Fatalf("status = %s, want %s", updated.Status, StatusError)
+	}
+	if updated.StatusMessage != "billing cycle quota exhausted" {
+		t.Fatalf("status message = %q, want billing cycle quota exhausted", updated.StatusMessage)
+	}
+	if !updated.Quota.Exceeded || updated.Quota.Reason != "billing_cycle_quota" {
+		t.Fatalf("auth quota = %+v, want billing_cycle_quota exceeded", updated.Quota)
+	}
+	minExpected := before.Add(accountQuotaCooldown)
+	maxExpected := after.Add(accountQuotaCooldown + time.Second)
+	if updated.NextRetryAfter.Before(minExpected) || updated.NextRetryAfter.After(maxExpected) {
+		t.Fatalf("auth next retry = %v, want within [%v, %v]", updated.NextRetryAfter, minExpected, maxExpected)
+	}
+
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state not found after billing cycle quota failure")
+	}
+	if !state.Quota.Exceeded || state.Quota.Reason != "billing_cycle_quota" {
+		t.Fatalf("model quota = %+v, want billing_cycle_quota exceeded", state.Quota)
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(updated, "kimi-k2.6-alt", time.Now())
+	if !blocked {
+		t.Fatal("auth should be blocked for other models")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("block reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if next.IsZero() {
+		t.Fatal("block should include next retry time")
+	}
+}
+
 func TestManager_Execute_SequentialFillMaxRetryCredentialsAllowsThreeFallbacks(t *testing.T) {
 	model := "sf-max-retry-credentials-model"
 	selector := &SequentialFillSelector{

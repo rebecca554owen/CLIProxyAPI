@@ -15,6 +15,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const openAICompatAccountQuotaRetryWait = 24 * time.Hour
+
 type openAICompatProfile struct {
 	Kind                     string
 	SupportsResponses        bool
@@ -330,6 +332,10 @@ func openAICompatRetryAfter(headers http.Header, body []byte) *time.Duration {
 			return retry
 		}
 	}
+	if openAICompatAccountQuotaLikeMessage(strings.ToLower(summarizeOpenAICompatError(body))) {
+		duration := openAICompatAccountQuotaRetryWait
+		return &duration
+	}
 	return nil
 }
 
@@ -445,6 +451,9 @@ func openAICompatPaymentLikeMessage(message string) bool {
 }
 
 func openAICompatQuotaLikeMessage(message string) bool {
+	if openAICompatAccountQuotaLikeMessage(message) {
+		return true
+	}
 	return containsAny(message,
 		"insufficient_quota",
 		"quota exhausted",
@@ -456,6 +465,17 @@ func openAICompatQuotaLikeMessage(message string) bool {
 		"额度已用尽",
 		"额度不足",
 		"频率限制",
+	)
+}
+
+func openAICompatAccountQuotaLikeMessage(message string) bool {
+	return containsAny(message,
+		"usage limit",
+		"billing cycle",
+		"quota will be refreshed",
+		"refreshed in the next cycle",
+		"quota-upgrade",
+		"monthly quota",
 	)
 }
 

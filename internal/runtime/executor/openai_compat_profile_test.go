@@ -30,6 +30,15 @@ func TestNormalizeOpenAICompatStatus_QuotaLikeMessage(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAICompatStatus_KimiBillingCycleUsageLimit(t *testing.T) {
+	t.Parallel()
+
+	message := "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. Upgrade to get more: https://www.kimi.com/code/console?from=quota-upgrade"
+	if got := normalizeOpenAICompatStatus(http.StatusForbidden, message); got != http.StatusTooManyRequests {
+		t.Fatalf("normalizeOpenAICompatStatus(kimi billing cycle quota) = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
 func TestNewOpenAICompatStatusErr_ParsesRetryAfter(t *testing.T) {
 	t.Parallel()
 
@@ -45,5 +54,23 @@ func TestNewOpenAICompatStatusErr_ParsesRetryAfter(t *testing.T) {
 	}
 	if *retryAfter != 12*time.Second {
 		t.Fatalf("RetryAfter() = %v, want %v", *retryAfter, 12*time.Second)
+	}
+}
+
+func TestNewOpenAICompatStatusErr_KimiBillingCycleUsageLimitHasRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"error":{"message":"You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. Upgrade to get more: https://www.kimi.com/code/console?from=quota-upgrade"}}`)
+	err := newOpenAICompatStatusErr(openAICompatProfileForKind("kimi"), nil, "kimi-k2.6", http.StatusForbidden, nil, "application/json", body)
+
+	if err.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want %d", err.StatusCode(), http.StatusTooManyRequests)
+	}
+	retryAfter := err.RetryAfter()
+	if retryAfter == nil {
+		t.Fatal("RetryAfter() = nil, want non-nil")
+	}
+	if *retryAfter != openAICompatAccountQuotaRetryWait {
+		t.Fatalf("RetryAfter() = %v, want %v", *retryAfter, openAICompatAccountQuotaRetryWait)
 	}
 }

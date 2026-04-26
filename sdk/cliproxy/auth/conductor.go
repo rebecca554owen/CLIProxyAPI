@@ -74,6 +74,7 @@ const (
 	quotaBackoffMax                  = 30 * time.Minute
 	quotaHardCooldownFailures        = health429OpenFailures
 	quotaImmediateCooldownRetryAfter = 15 * time.Minute
+	accountQuotaCooldown             = 24 * time.Hour
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2974,6 +2975,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Status = StatusError
 					state.UpdatedAt = now
 					statusCode := statusCodeFromResult(result.Error)
+					accountQuotaFailure := isAccountQuotaExhaustedResultError(result.Error)
 					applyHealthFailure(&state.Health, now, statusCode)
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
@@ -2987,6 +2989,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
+					} else if accountQuotaFailure {
+						applyHealthFailure(&auth.Health, now, statusCode)
+						next := applyAccountQuotaFailureState(auth, state, result.Error, result.RetryAfter, now)
+						suspendReason = "billing_cycle_quota"
+						shouldSuspendModel = true
+						setModelQuota = true
+						modelQuotaRecoverAt = next
 					} else {
 						switch statusCode {
 						case 401:
@@ -3062,7 +3071,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					auth.Status = StatusError
 					auth.UpdatedAt = now
-					updateAggregatedAvailability(auth, now)
+					if !accountQuotaFailure {
+						updateAggregatedAvailability(auth, now)
+					}
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
@@ -3596,10 +3607,90 @@ func isPersistedModelSupportState(state *ModelState) bool {
 	return isModelSupportErrorMessage(state.StatusMessage)
 }
 
+func isAccountQuotaExhaustedResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	switch statusCodeFromResult(err) {
+	case http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+	default:
+		return false
+	}
+	return isAccountQuotaExhaustedMessage(err.Message)
+}
+
+func isAccountQuotaExhaustedMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"usage limit",
+		"billing cycle",
+		"quota will be refreshed",
+		"refreshed in the next cycle",
+		"quota-upgrade",
+		"monthly quota",
+		"用量上限",
+		"账期",
+		"帳期",
+		"下个周期",
+		"下一周期",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func accountQuotaRetryAfter(retryAfter *time.Duration) time.Duration {
+	if retryAfter != nil && *retryAfter > 0 {
+		return *retryAfter
+	}
+	return accountQuotaCooldown
+}
+
+func applyAccountQuotaFailureState(auth *Auth, state *ModelState, resultErr *Error, retryAfter *time.Duration, now time.Time) time.Time {
+	next := now.Add(accountQuotaRetryAfter(retryAfter))
+	statusMessage := "billing cycle quota exhausted"
+	quota := QuotaState{
+		Exceeded:      true,
+		Reason:        "billing_cycle_quota",
+		NextRecoverAt: next,
+	}
+
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.StatusMessage = statusMessage
+	auth.NextRetryAfter = next
+	auth.Quota = quota
+	auth.UpdatedAt = now
+	if resultErr != nil {
+		auth.LastError = cloneError(resultErr)
+	}
+	if state != nil {
+		state.Unavailable = true
+		state.Status = StatusError
+		state.StatusMessage = statusMessage
+		state.NextRetryAfter = next
+		state.Quota = quota
+		state.UpdatedAt = now
+		if resultErr != nil {
+			state.LastError = cloneError(resultErr)
+		}
+	}
+	return next
+}
+
 func isRetryableAvailabilityErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if lower == "" {
 		return false
+	}
+	if isAccountQuotaExhaustedMessage(lower) {
+		return true
 	}
 	patterns := [...]string{
 		"payment required",
@@ -3783,6 +3874,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	if isAccountQuotaExhaustedResultError(resultErr) {
+		applyAccountQuotaFailureState(auth, nil, resultErr, retryAfter, now)
+		return
+	}
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
