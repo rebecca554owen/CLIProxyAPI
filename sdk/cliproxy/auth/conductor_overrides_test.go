@@ -664,6 +664,95 @@ func (e *retryAfterStatusError) RetryAfter() *time.Duration {
 	return &d
 }
 
+type emptyStreamRetryExecutor struct {
+	id string
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *emptyStreamRetryExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *emptyStreamRetryExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "Execute not implemented"}
+}
+
+func (e *emptyStreamRetryExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	calls := e.calls
+	e.mu.Unlock()
+
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	if calls == 1 {
+		close(ch)
+		return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+	}
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte("ok")}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *emptyStreamRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *emptyStreamRetryExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "CountTokens not implemented"}
+}
+
+func (e *emptyStreamRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *emptyStreamRetryExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func TestManagerExecuteStream_RetriesRetryableEmptyStream(t *testing.T) {
+	const model = "gpt-5.5"
+	const authID = "empty-stream-auth"
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(1, 30*time.Second, 0)
+
+	executor := &emptyStreamRetryExecutor{id: "codex"}
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream: %v", errExecute)
+	}
+
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != "ok" {
+		t.Fatalf("payload = %q, want ok", string(payload))
+	}
+	if got := executor.Calls(); got != 2 {
+		t.Fatalf("stream calls = %d, want 2", got)
+	}
+}
+
 func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
 	t.Helper()
 

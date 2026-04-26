@@ -2837,6 +2837,12 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
+	if status == 0 && isRetryableAuthError(err) {
+		if !m.retryAllowed(attempt, providers) {
+			return 0, false
+		}
+		return 0, true
+	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
 		if wait > maxWait {
@@ -2855,6 +2861,17 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		return 0, false
 	}
 	return *retryAfter, true
+}
+
+func isRetryableAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Retryable
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
