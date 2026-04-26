@@ -210,3 +210,65 @@ func TestPatchAuthFileStatusConfigBackedMatchesBaseURL(t *testing.T) {
 		t.Fatalf("expected auth %s to be disabled", authBID)
 	}
 }
+
+func TestPatchAuthFileStatusConfigBackedMatchesOpenAICompatDuplicateByID(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("openai-compatibility:\n  - name: kimi\n    base-url: https://api.kimi.example.com/v1\n    api-key-entries:\n      - api-key: sk-duplicate\n        disabled: true\n      - api-key: sk-duplicate\n    models:\n      - name: kimi-k2\n        alias: kimi-k2\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := &config.Config{
+		AuthDir: tmpDir,
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "kimi",
+			BaseURL: "https://api.kimi.example.com/v1",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "sk-duplicate", Disabled: true},
+				{APIKey: "sk-duplicate"},
+			},
+			Models: []config.OpenAICompatibilityModel{{
+				Name:  "kimi-k2",
+				Alias: "kimi-k2",
+			}},
+		}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandler(cfg, configPath, manager)
+	h.mu.Lock()
+	h.syncRuntimeConfigLocked(context.Background())
+	h.mu.Unlock()
+
+	idGen := synthesizer.NewStableIDGenerator()
+	firstID, _ := idGen.Next("openai-compatibility:kimi", "sk-duplicate", "https://api.kimi.example.com/v1", "")
+	secondID, _ := idGen.Next("openai-compatibility:kimi", "sk-duplicate", "https://api.kimi.example.com/v1", "")
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(`{"name":"`+secondID+`","disabled":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.PatchAuthFileStatus(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthFileStatus status = %d, want %d with body %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !h.cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled {
+		t.Fatal("first duplicate entry should remain disabled")
+	}
+	if !h.cfg.OpenAICompatibility[0].APIKeyEntries[1].Disabled {
+		t.Fatal("target duplicate entry should be disabled by its stable auth ID")
+	}
+	firstAuth, ok := manager.GetByID(firstID)
+	if !ok || firstAuth == nil || !firstAuth.Disabled {
+		t.Fatalf("expected first auth %s to remain disabled", firstID)
+	}
+	secondAuth, ok := manager.GetByID(secondID)
+	if !ok || secondAuth == nil || !secondAuth.Disabled {
+		t.Fatalf("expected second auth %s to be disabled", secondID)
+	}
+}

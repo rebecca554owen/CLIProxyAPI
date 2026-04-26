@@ -31,6 +31,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -1352,6 +1353,10 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 	}
 	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
 	authBaseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	targetID := strings.TrimSpace(auth.ID)
+	matchesTargetID := func(candidateID string) bool {
+		return targetID != "" && strings.TrimSpace(candidateID) == targetID
+	}
 	matchesKeyAndBaseURL := func(entryKey, entryBaseURL string) bool {
 		if strings.TrimSpace(entryKey) != apiKey {
 			return false
@@ -1367,8 +1372,10 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 
 	switch provider {
 	case "gemini":
+		idGen := synthesizer.NewStableIDGenerator()
 		for i := range h.cfg.GeminiKey {
-			if matchesKeyAndBaseURL(h.cfg.GeminiKey[i].APIKey, h.cfg.GeminiKey[i].BaseURL) {
+			id, _ := idGen.Next("gemini:apikey", h.cfg.GeminiKey[i].APIKey, h.cfg.GeminiKey[i].BaseURL)
+			if matchesTargetID(id) || (targetID == "" && matchesKeyAndBaseURL(h.cfg.GeminiKey[i].APIKey, h.cfg.GeminiKey[i].BaseURL)) {
 				if h.cfg.GeminiKey[i].Disabled != disabled {
 					h.cfg.GeminiKey[i].Disabled = disabled
 					changed = true
@@ -1377,8 +1384,10 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 			}
 		}
 	case "claude":
+		idGen := synthesizer.NewStableIDGenerator()
 		for i := range h.cfg.ClaudeKey {
-			if matchesKeyAndBaseURL(h.cfg.ClaudeKey[i].APIKey, h.cfg.ClaudeKey[i].BaseURL) {
+			id, _ := idGen.Next("claude:apikey", h.cfg.ClaudeKey[i].APIKey, h.cfg.ClaudeKey[i].BaseURL)
+			if matchesTargetID(id) || (targetID == "" && matchesKeyAndBaseURL(h.cfg.ClaudeKey[i].APIKey, h.cfg.ClaudeKey[i].BaseURL)) {
 				if h.cfg.ClaudeKey[i].Disabled != disabled {
 					h.cfg.ClaudeKey[i].Disabled = disabled
 					changed = true
@@ -1387,8 +1396,10 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 			}
 		}
 	case "codex":
+		idGen := synthesizer.NewStableIDGenerator()
 		for i := range h.cfg.CodexKey {
-			if matchesKeyAndBaseURL(h.cfg.CodexKey[i].APIKey, h.cfg.CodexKey[i].BaseURL) {
+			id, _ := idGen.Next("codex:apikey", h.cfg.CodexKey[i].APIKey, h.cfg.CodexKey[i].BaseURL)
+			if matchesTargetID(id) || (targetID == "" && matchesKeyAndBaseURL(h.cfg.CodexKey[i].APIKey, h.cfg.CodexKey[i].BaseURL)) {
 				if h.cfg.CodexKey[i].Disabled != disabled {
 					h.cfg.CodexKey[i].Disabled = disabled
 					changed = true
@@ -1397,8 +1408,11 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 			}
 		}
 	case "vertex":
+		idGen := synthesizer.NewStableIDGenerator()
 		for i := range h.cfg.VertexCompatAPIKey {
-			if matchesKeyAndBaseURL(h.cfg.VertexCompatAPIKey[i].APIKey, h.cfg.VertexCompatAPIKey[i].BaseURL) {
+			entry := &h.cfg.VertexCompatAPIKey[i]
+			id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
+			if matchesTargetID(id) || (targetID == "" && matchesKeyAndBaseURL(entry.APIKey, entry.BaseURL)) {
 				if h.cfg.VertexCompatAPIKey[i].Disabled != disabled {
 					h.cfg.VertexCompatAPIKey[i].Disabled = disabled
 					changed = true
@@ -1410,13 +1424,21 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 		// OpenAI-compatibility and other providers
 		compatName := strings.TrimSpace(auth.Attributes["compat_name"])
 		proxyURL := strings.TrimSpace(auth.ProxyURL)
+		idGen := synthesizer.NewStableIDGenerator()
 		for i := range h.cfg.OpenAICompatibility {
-			if !strings.EqualFold(h.cfg.OpenAICompatibility[i].Name, compatName) {
-				continue
+			providerName := strings.ToLower(strings.TrimSpace(h.cfg.OpenAICompatibility[i].Name))
+			if providerName == "" {
+				providerName = "openai-compatibility"
 			}
+			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			for j := range h.cfg.OpenAICompatibility[i].APIKeyEntries {
 				entry := &h.cfg.OpenAICompatibility[i].APIKeyEntries[j]
-				if strings.TrimSpace(entry.APIKey) == apiKey && strings.TrimSpace(entry.ProxyURL) == proxyURL {
+				id, _ := idGen.Next(idKind, entry.APIKey, h.cfg.OpenAICompatibility[i].BaseURL, entry.ProxyURL)
+				fallbackMatch := targetID == "" &&
+					strings.EqualFold(h.cfg.OpenAICompatibility[i].Name, compatName) &&
+					strings.TrimSpace(entry.APIKey) == apiKey &&
+					strings.TrimSpace(entry.ProxyURL) == proxyURL
+				if matchesTargetID(id) || fallbackMatch {
 					if entry.Disabled != disabled {
 						entry.Disabled = disabled
 						changed = true
