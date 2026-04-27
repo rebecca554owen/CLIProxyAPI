@@ -2,12 +2,10 @@ package handlers
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"sync"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -465,7 +463,7 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 	}
 }
 
-func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError(t *testing.T) {
+func TestExecuteStreamWithAuthManager_RetriesSameAuthBeforeFirstByte(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -499,36 +497,18 @@ func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError
 	for chunk := range dataChan {
 		got = append(got, chunk...)
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected empty payload, got %q", string(got))
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
 	}
 
-	var gotErr *interfaces.ErrorMessage
 	for msg := range errChan {
 		if msg != nil {
-			gotErr = msg
+			t.Fatalf("unexpected error: %+v", msg)
 		}
 	}
-	if gotErr == nil {
-		t.Fatalf("expected terminal error")
-	}
-	if gotErr.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", gotErr.StatusCode, http.StatusServiceUnavailable)
-	}
 
-	var authErr *coreauth.Error
-	if !errors.As(gotErr.Error, &authErr) || authErr == nil {
-		t.Fatalf("expected coreauth.Error, got %T", gotErr.Error)
-	}
-	if authErr.Code != "auth_not_found" && authErr.Code != "auth_unavailable" {
-		t.Fatalf("code = %q, want auth_not_found or auth_unavailable", authErr.Code)
-	}
-	if authErr.Message != "requested route is temporarily unavailable" {
-		t.Fatalf("message = %q, want %q", authErr.Message, "requested route is temporarily unavailable")
-	}
-
-	if executor.Calls() != 1 {
-		t.Fatalf("expected exactly one upstream call before retry path selection failure, got %d", executor.Calls())
+	if executor.Calls() != 2 {
+		t.Fatalf("expected 2 stream attempts, got %d", executor.Calls())
 	}
 }
 
