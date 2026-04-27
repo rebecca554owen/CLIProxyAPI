@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestParseCodexRetryAfter(t *testing.T) {
@@ -108,6 +110,14 @@ func TestNewCodexStatusErrClassifiesKnownCodexFailures(t *testing.T) {
 			wantCode:   "previous_response_not_found",
 		},
 		{
+			name:       "stateless persisted item missing",
+			statusCode: http.StatusNotFound,
+			body:       []byte(`{"error":{"message":"Item with id 'rs_123' not found. Items are not persisted when store is set to false.","type":"invalid_request_error","code":null}}`),
+			wantStatus: http.StatusNotFound,
+			wantType:   "invalid_request_error",
+			wantCode:   "previous_response_not_found",
+		},
+		{
 			name:       "auth unavailable",
 			statusCode: http.StatusUnauthorized,
 			body:       []byte(`{"error":{"message":"invalid or expired token","type":"authentication_error","code":"invalid_api_key"}}`),
@@ -126,6 +136,35 @@ func TestNewCodexStatusErrClassifiesKnownCodexFailures(t *testing.T) {
 			}
 			assertCodexErrorCode(t, err.Error(), tc.wantType, tc.wantCode)
 		})
+	}
+}
+
+func TestNormalizeCodexStatelessPayloadDropsPersistedItemIDs(t *testing.T) {
+	body := []byte(`{
+		"store": false,
+		"previous_response_id": "resp_old",
+		"input": [
+			{"type":"reasoning","id":"rs_123","encrypted_content":"enc_123","summary":[]},
+			{"type":"message","id":"msg_123","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"function_call_output","id":"out_123","call_id":"call_123","output":"ok"}
+		]
+	}`)
+
+	got := normalizeCodexStatelessPayload(body)
+
+	if gjson.GetBytes(got, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id should be removed: %s", string(got))
+	}
+	for idx := range gjson.GetBytes(got, "input").Array() {
+		if gjson.GetBytes(got, "input."+strconv.Itoa(idx)+".id").Exists() {
+			t.Fatalf("input item id at index %d should be removed: %s", idx, string(got))
+		}
+	}
+	if gotSig := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotSig != "enc_123" {
+		t.Fatalf("encrypted_content = %q, want enc_123", gotSig)
+	}
+	if gotCallID := gjson.GetBytes(got, "input.2.call_id").String(); gotCallID != "call_123" {
+		t.Fatalf("call_id = %q, want call_123", gotCallID)
 	}
 }
 
