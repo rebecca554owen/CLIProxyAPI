@@ -3,10 +3,13 @@ package usage
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
+
+const defaultQueueSize = 512
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
@@ -52,6 +55,8 @@ type Manager struct {
 	cond   *sync.Cond
 	queue  []queueItem
 	closed bool
+	maxLen int
+	drops  atomic.Uint64
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -59,7 +64,10 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	if buffer <= 0 {
+		buffer = defaultQueueSize
+	}
+	m := &Manager{maxLen: buffer}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -118,9 +126,25 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		m.mu.Unlock()
 		return
 	}
+	if m.maxLen > 0 && len(m.queue) >= m.maxLen {
+		copy(m.queue, m.queue[1:])
+		m.queue[len(m.queue)-1] = queueItem{ctx: ctx, record: record}
+		m.drops.Add(1)
+		m.mu.Unlock()
+		m.cond.Signal()
+		return
+	}
 	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
 	m.mu.Unlock()
 	m.cond.Signal()
+}
+
+// Dropped returns the number of usage records dropped because the queue was full.
+func (m *Manager) Dropped() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.drops.Load()
 }
 
 func (m *Manager) run(ctx context.Context) {
@@ -134,6 +158,7 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
 		m.mu.Unlock()
 		m.dispatch(item)

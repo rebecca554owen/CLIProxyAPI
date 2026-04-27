@@ -104,6 +104,38 @@ func TestGetCombinedSnapshot_StoreOnlySnapshotIgnoresMemory(t *testing.T) {
 	}
 }
 
+func TestLoggerPluginSkipsMemoryWhenDatabaseStoreOnlySnapshotEnabled(t *testing.T) {
+	oldPlugin := databasePlugin
+	oldStats := defaultRequestStatistics
+	oldEnabled := StatisticsEnabled()
+	defer func() {
+		databasePlugin = oldPlugin
+		defaultRequestStatistics = oldStats
+		SetStatisticsEnabled(oldEnabled)
+	}()
+
+	databasePlugin = &DatabasePlugin{
+		store:             &fakeUsageStore{},
+		storeOnlySnapshot: true,
+	}
+	defaultRequestStatistics = NewRequestStatistics()
+	SetStatisticsEnabled(true)
+
+	NewLoggerPlugin().HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "mem-api",
+		Model:       "gpt-5.5",
+		RequestedAt: time.Now(),
+		Detail: coreusage.Detail{
+			TotalTokens: 10,
+		},
+	})
+
+	snapshot := defaultRequestStatistics.Snapshot()
+	if snapshot.TotalRequests != 0 {
+		t.Fatalf("memory total requests = %d, want 0", snapshot.TotalRequests)
+	}
+}
+
 func TestUpdatePersistenceFallsBackToLocalStoreWhenPostgresUnavailable(t *testing.T) {
 	CloseDatabasePlugin()
 	defer CloseDatabasePlugin()

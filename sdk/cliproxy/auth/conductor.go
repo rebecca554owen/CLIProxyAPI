@@ -75,6 +75,7 @@ const (
 	quotaHardCooldownFailures        = health429OpenFailures
 	quotaImmediateCooldownRetryAfter = 15 * time.Minute
 	accountQuotaCooldown             = 24 * time.Hour
+	halfOpenProbeStateLimit          = 4096
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -927,6 +928,7 @@ func (m *Manager) nextHalfOpenProbeAt(authID, model string) time.Time {
 	m.halfOpenProbeMu.Lock()
 	defer m.halfOpenProbeMu.Unlock()
 	nowTime := time.Now()
+	m.pruneHalfOpenProbeStateLocked(nowTime)
 	if activeUntil := m.halfOpenProbeActiveUntil[key]; !activeUntil.IsZero() && !activeUntil.After(nowTime) {
 		delete(m.halfOpenProbeActiveUntil, key)
 	}
@@ -958,6 +960,7 @@ func (m *Manager) reserveHalfOpenProbeWithWindow(authID, model string, now time.
 	}
 	m.halfOpenProbeMu.Lock()
 	defer m.halfOpenProbeMu.Unlock()
+	m.pruneHalfOpenProbeStateLocked(now)
 	if next := m.halfOpenProbeNext[key]; !next.IsZero() && next.After(now) {
 		return false, next
 	}
@@ -980,6 +983,7 @@ func (m *Manager) halfOpenProbeActive(authID, model string, now time.Time) bool 
 	}
 	m.halfOpenProbeMu.Lock()
 	defer m.halfOpenProbeMu.Unlock()
+	m.pruneHalfOpenProbeStateLocked(now)
 	activeUntil := m.halfOpenProbeActiveUntil[key]
 	if activeUntil.IsZero() {
 		return false
@@ -989,6 +993,37 @@ func (m *Manager) halfOpenProbeActive(authID, model string, now time.Time) bool 
 		return false
 	}
 	return true
+}
+
+func (m *Manager) pruneHalfOpenProbeStateLocked(now time.Time) {
+	if m == nil {
+		return
+	}
+	if len(m.halfOpenProbeNext)+len(m.halfOpenProbeActiveUntil) <= halfOpenProbeStateLimit {
+		return
+	}
+	for key, next := range m.halfOpenProbeNext {
+		if next.IsZero() || !next.After(now) {
+			delete(m.halfOpenProbeNext, key)
+		}
+	}
+	for key, activeUntil := range m.halfOpenProbeActiveUntil {
+		if activeUntil.IsZero() || !activeUntil.After(now) {
+			delete(m.halfOpenProbeActiveUntil, key)
+		}
+	}
+	for len(m.halfOpenProbeNext) > halfOpenProbeStateLimit {
+		for key := range m.halfOpenProbeNext {
+			delete(m.halfOpenProbeNext, key)
+			break
+		}
+	}
+	for len(m.halfOpenProbeActiveUntil) > halfOpenProbeStateLimit {
+		for key := range m.halfOpenProbeActiveUntil {
+			delete(m.halfOpenProbeActiveUntil, key)
+			break
+		}
+	}
 }
 
 func healthRequiresHalfOpenProbe(auth *Auth, model string, now time.Time) bool {

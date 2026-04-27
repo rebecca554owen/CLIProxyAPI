@@ -17,6 +17,8 @@ import (
 
 var statisticsEnabled atomic.Bool
 
+const defaultMaxRequestDetailsPerModel = 1000
+
 func init() {
 	statisticsEnabled.Store(true)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
@@ -45,6 +47,9 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		return
 	}
 	if p == nil || p.stats == nil {
+		return
+	}
+	if DatabaseStoreOnlySnapshotEnabled() {
 		return
 	}
 	p.stats.Record(ctx, record)
@@ -222,7 +227,22 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
-	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	modelStatsValue.Details = appendBoundedRequestDetail(modelStatsValue.Details, detail, defaultMaxRequestDetailsPerModel)
+}
+
+func appendBoundedRequestDetail(details []RequestDetail, detail RequestDetail, limit int) []RequestDetail {
+	if limit <= 0 || len(details) < limit {
+		return append(details, detail)
+	}
+	if cap(details) > limit*2 {
+		trimmed := make([]RequestDetail, limit)
+		copy(trimmed, details[len(details)-limit+1:])
+		trimmed[limit-1] = detail
+		return trimmed
+	}
+	copy(details, details[1:])
+	details[limit-1] = detail
+	return details[:limit]
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.

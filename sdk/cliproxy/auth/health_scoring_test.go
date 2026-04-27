@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -243,6 +244,33 @@ func TestManagerReserveHalfOpenProbe_AllowsSingleProbePerInterval(t *testing.T) 
 	}
 	if blockedUntil.IsZero() || !blockedUntil.After(now) {
 		t.Fatalf("second reserveHalfOpenProbe() blockedUntil = %v, want future time", blockedUntil)
+	}
+}
+
+func TestManagerReserveHalfOpenProbe_PrunesExpiredProbeState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.halfOpenProbeMu.Lock()
+	for i := 0; i < halfOpenProbeStateLimit+10; i++ {
+		key := halfOpenProbeKey(fmt.Sprintf("auth-%d", i), "gpt-5.4")
+		manager.halfOpenProbeNext[key] = now.Add(-time.Second)
+		manager.halfOpenProbeActiveUntil[key] = now.Add(-time.Second)
+	}
+	manager.halfOpenProbeMu.Unlock()
+
+	ok, _ := manager.reserveHalfOpenProbe("fresh-auth", "gpt-5.4", now)
+	if !ok {
+		t.Fatal("reserveHalfOpenProbe() = false, want true after pruning expired state")
+	}
+
+	manager.halfOpenProbeMu.Lock()
+	nextLen := len(manager.halfOpenProbeNext)
+	activeLen := len(manager.halfOpenProbeActiveUntil)
+	manager.halfOpenProbeMu.Unlock()
+	if nextLen != 1 || activeLen != 1 {
+		t.Fatalf("probe state len = next:%d active:%d, want 1/1", nextLen, activeLen)
 	}
 }
 

@@ -116,6 +116,16 @@ func GetDatabasePlugin() *DatabasePlugin {
 	return databasePlugin
 }
 
+// DatabaseStoreOnlySnapshotEnabled reports whether database usage statistics are
+// the authoritative snapshot source. In this mode the in-memory logger should
+// avoid duplicating per-request details that are already persisted by the
+// database plugin.
+func DatabaseStoreOnlySnapshotEnabled() bool {
+	databasePluginMu.RLock()
+	defer databasePluginMu.RUnlock()
+	return databasePlugin != nil && databasePlugin.storeOnlySnapshot
+}
+
 // CloseDatabasePlugin closes the database connection after flushing pending writes.
 func CloseDatabasePlugin() {
 	databasePluginMu.Lock()

@@ -32,6 +32,35 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsLimitsDetailsPerModel(t *testing.T) {
+	stats := NewRequestStatistics()
+	base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < defaultMaxRequestDetailsPerModel+5; i++ {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "test-key",
+			Model:       "gpt-5.5",
+			RequestedAt: base.Add(time.Duration(i) * time.Second),
+			Detail: coreusage.Detail{
+				TotalTokens: int64(i + 1),
+			},
+		})
+	}
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.5"].Details
+	if len(details) != defaultMaxRequestDetailsPerModel {
+		t.Fatalf("details len = %d, want %d", len(details), defaultMaxRequestDetailsPerModel)
+	}
+	if !details[0].Timestamp.Equal(base.Add(5 * time.Second)) {
+		t.Fatalf("oldest timestamp = %s, want %s", details[0].Timestamp, base.Add(5*time.Second))
+	}
+	last := details[len(details)-1]
+	wantLast := base.Add(time.Duration(defaultMaxRequestDetailsPerModel+4) * time.Second)
+	if !last.Timestamp.Equal(wantLast) {
+		t.Fatalf("latest timestamp = %s, want %s", last.Timestamp, wantLast)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	stats := NewRequestStatistics()
 	timestamp := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
