@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -205,6 +206,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
+	bodyForUpstream = downgradeClaudeStructuredOutputForCompat(baseURL, bodyForUpstream)
 	oauthToken := isClaudeOAuthToken(apiKey)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
@@ -397,6 +399,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
+	bodyForUpstream = downgradeClaudeStructuredOutputForCompat(baseURL, bodyForUpstream)
 	oauthToken := isClaudeOAuthToken(apiKey)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
@@ -1036,6 +1039,81 @@ func checkSystemInstructions(payload []byte) []byte {
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+func downgradeClaudeStructuredOutputForCompat(baseURL string, body []byte) []byte {
+	if isOfficialAnthropicBaseURL(baseURL) || len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	format := gjson.GetBytes(body, "output_config.format")
+	if !format.Exists() {
+		return body
+	}
+	if format.IsObject() && len(format.Map()) == 0 {
+		return body
+	}
+	instruction := buildStructuredOutputCompatInstruction(format.Raw)
+	if instruction != "" {
+		body = appendClaudeSystemText(body, instruction)
+	}
+	body, _ = sjson.DeleteBytes(body, "output_config.format")
+	if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return body
+}
+
+func isOfficialAnthropicBaseURL(rawBaseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawBaseURL))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "api.anthropic.com")
+}
+
+func buildStructuredOutputCompatInstruction(formatRaw string) string {
+	formatRaw = strings.TrimSpace(formatRaw)
+	if formatRaw == "" {
+		return ""
+	}
+	return "Structured output compatibility mode: the original request included Anthropic output_config.format, but this upstream does not support that field natively. Return only a valid JSON value that conforms to the requested format/schema below. Do not include Markdown fences, explanations, or any text outside the JSON.\n\nRequested output_config.format:\n" + formatRaw
+}
+
+func appendClaudeSystemText(body []byte, text string) []byte {
+	text = strings.TrimSpace(text)
+	if text == "" || len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	system := gjson.GetBytes(body, "system")
+	if !system.Exists() {
+		if next, err := sjson.SetBytes(body, "system", text); err == nil {
+			return next
+		}
+		return body
+	}
+	if system.IsArray() {
+		block := fmt.Sprintf(`{"type":"text","text":%s}`, strconv.Quote(text))
+		if next, err := sjson.SetRawBytes(body, fmt.Sprintf("system.%d", len(system.Array())), []byte(block)); err == nil {
+			return next
+		}
+		return body
+	}
+	if system.Type == gjson.String {
+		combined := strings.TrimSpace(system.String())
+		if combined != "" {
+			combined += "\n\n"
+		}
+		combined += text
+		if next, err := sjson.SetBytes(body, "system", combined); err == nil {
+			return next
+		}
+		return body
+	}
+	combined := fmt.Sprintf("Existing system value: %s\n\n%s", strings.TrimSpace(system.Raw), text)
+	if next, err := sjson.SetBytes(body, "system", combined); err == nil {
+		return next
+	}
+	return body
 }
 
 func validateClaudeUpstreamPayload(baseURL string, body []byte) error {

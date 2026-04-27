@@ -2341,6 +2341,76 @@ func TestValidateClaudeUpstreamPayload_MiniMaxRejectsStructuredOutputFormat(t *t
 	}
 }
 
+func TestDowngradeClaudeStructuredOutputForCompat_NonAnthropicRemovesFormatAndInjectsSchema(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"MiniMax-M2.5",
+		"system":"Be concise.",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"output_config":{
+			"format":{
+				"type":"json_schema",
+				"json_schema":{"name":"result","schema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}
+			}
+		}
+	}`)
+
+	out := downgradeClaudeStructuredOutputForCompat("https://api.minimax.io/anthropic", payload)
+	if gjson.GetBytes(out, "output_config.format").Exists() {
+		t.Fatalf("output_config.format should be removed, got %s", string(out))
+	}
+	system := gjson.GetBytes(out, "system").String()
+	if !strings.Contains(system, "Structured output compatibility mode") {
+		t.Fatalf("system prompt missing compatibility instruction: %q", system)
+	}
+	if !strings.Contains(system, `"json_schema"`) || !strings.Contains(system, `"ok"`) {
+		t.Fatalf("system prompt missing schema: %q", system)
+	}
+	if err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", out); err != nil {
+		t.Fatalf("downgraded payload should pass MiniMax validation, got %v", err)
+	}
+}
+
+func TestDowngradeClaudeStructuredOutputForCompat_OfficialAnthropicPreservesFormat(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"output_config":{
+			"format":{"type":"json_schema","json_schema":{"name":"result","schema":{"type":"object"}}}
+		}
+	}`)
+
+	out := downgradeClaudeStructuredOutputForCompat("https://api.anthropic.com", payload)
+	if !gjson.GetBytes(out, "output_config.format").Exists() {
+		t.Fatalf("official Anthropic payload should preserve output_config.format, got %s", string(out))
+	}
+}
+
+func TestDowngradeClaudeStructuredOutputForCompat_AppendsArraySystemBlock(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"system":[{"type":"text","text":"Existing system."}],
+		"output_config":{"format":{"type":"json_object"}}
+	}`)
+
+	out := downgradeClaudeStructuredOutputForCompat("https://api.moonshot.cn/anthropic", payload)
+	system := gjson.GetBytes(out, "system")
+	if got := len(system.Array()); got != 2 {
+		t.Fatalf("system block count = %d, want 2; payload=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.1.type").String(); got != "text" {
+		t.Fatalf("system.1.type = %q, want text", got)
+	}
+	if got := gjson.GetBytes(out, "system.1.text").String(); !strings.Contains(got, "json_object") {
+		t.Fatalf("system.1.text missing format: %q", got)
+	}
+}
+
 func TestValidateClaudeUpstreamPayload_NonMiniMaxAllowsStructuredOutputFormat(t *testing.T) {
 	t.Parallel()
 
