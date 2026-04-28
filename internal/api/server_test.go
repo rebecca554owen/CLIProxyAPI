@@ -177,6 +177,46 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestUnsupportedOpenAIAudioEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	paths := []string{
+		"/v1/audio/transcriptions",
+		"/v1/audio/translations",
+		"/v1/audio/speech",
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-5.5"}`))
+			req.Header.Set("Authorization", "Bearer test-key")
+
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", path, rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+
+			var resp struct {
+				Error struct {
+					Code string `json:"code"`
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+			}
+			if resp.Error.Code != "unsupported_endpoint" {
+				t.Fatalf("unexpected error code for %s: got %q", path, resp.Error.Code)
+			}
+			if resp.Error.Type != "invalid_request_error" {
+				t.Fatalf("unexpected error type for %s: got %q", path, resp.Error.Type)
+			}
+		})
+	}
+}
+
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string

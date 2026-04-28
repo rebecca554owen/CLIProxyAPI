@@ -381,6 +381,9 @@ func (s *Server) setupRoutes() {
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
 		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
+		v1.POST("/audio/transcriptions", unsupportedOpenAIAudioEndpoint)
+		v1.POST("/audio/translations", unsupportedOpenAIAudioEndpoint)
+		v1.POST("/audio/speech", unsupportedOpenAIAudioEndpoint)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
@@ -472,6 +475,17 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+func unsupportedOpenAIAudioEndpoint(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+		"error": gin.H{
+			"message": "Audio endpoints are not supported by CLIProxyAPI. Use an audio-capable upstream for transcription, translation, or speech requests.",
+			"type":    "invalid_request_error",
+			"param":   nil,
+			"code":    "unsupported_endpoint",
+		},
+	})
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
