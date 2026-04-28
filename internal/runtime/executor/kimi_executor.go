@@ -75,6 +75,10 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		req, opts, err = repairKimiClaudeToolUseRequest(req, opts)
+		if err != nil {
+			return resp, err
+		}
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
@@ -182,6 +186,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		req, opts, err = repairKimiClaudeToolUseRequest(req, opts)
+		if err != nil {
+			return nil, err
+		}
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
@@ -308,8 +316,135 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var err error
+	if opts.SourceFormat.String() == "claude" {
+		req, opts, err = repairKimiClaudeToolUseRequest(req, opts)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+	}
 	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
+}
+
+func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	repaired, removed, err := dropUnansweredClaudeToolUses(req.Payload)
+	if err != nil {
+		return req, opts, err
+	}
+	req.Payload = repaired
+
+	if len(opts.OriginalRequest) > 0 {
+		original, _, errOriginal := dropUnansweredClaudeToolUses(opts.OriginalRequest)
+		if errOriginal != nil {
+			return req, opts, errOriginal
+		}
+		opts.OriginalRequest = original
+	}
+
+	if removed > 0 {
+		log.WithField("removed_tool_uses", removed).Warn("kimi executor: dropped unanswered Claude tool_use history")
+	}
+	return req, opts, nil
+}
+
+func dropUnansweredClaudeToolUses(body []byte) ([]byte, int, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, 0, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, 0, nil
+	}
+
+	msgs := messages.Array()
+	outMessages := []byte(`[]`)
+	changed := false
+	removed := 0
+
+	for msgIdx, msg := range msgs {
+		role := strings.TrimSpace(msg.Get("role").String())
+		content := msg.Get("content")
+		if role != "assistant" || !content.IsArray() {
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+			continue
+		}
+
+		nextToolResults := claudeToolResultIDsInNextUserMessage(msgs, msgIdx)
+		contentOut := []byte(`[]`)
+		contentChanged := false
+		keptParts := 0
+
+		for _, part := range content.Array() {
+			if part.Get("type").String() == "tool_use" {
+				toolUseID := strings.TrimSpace(part.Get("id").String())
+				if toolUseID == "" || !nextToolResults[toolUseID] {
+					contentChanged = true
+					removed++
+					continue
+				}
+			}
+
+			contentOut, _ = sjson.SetRawBytes(contentOut, "-1", []byte(part.Raw))
+			keptParts++
+		}
+
+		if !contentChanged {
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+			continue
+		}
+
+		changed = true
+		if keptParts == 0 {
+			continue
+		}
+
+		msgOut, err := sjson.SetRawBytes([]byte(msg.Raw), "content", contentOut)
+		if err != nil {
+			return body, 0, fmt.Errorf("kimi executor: failed to drop unanswered Claude tool_use: %w", err)
+		}
+		outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgOut)
+	}
+
+	if !changed {
+		return body, 0, nil
+	}
+
+	out, err := sjson.SetRawBytes(body, "messages", outMessages)
+	if err != nil {
+		return body, 0, fmt.Errorf("kimi executor: failed to update Claude messages: %w", err)
+	}
+	return out, removed, nil
+}
+
+func claudeToolResultIDsInNextUserMessage(messages []gjson.Result, assistantIdx int) map[string]bool {
+	result := make(map[string]bool)
+	nextIdx := assistantIdx + 1
+	if nextIdx >= len(messages) {
+		return result
+	}
+
+	next := messages[nextIdx]
+	if strings.TrimSpace(next.Get("role").String()) != "user" {
+		return result
+	}
+
+	content := next.Get("content")
+	if !content.IsArray() {
+		return result
+	}
+
+	for _, part := range content.Array() {
+		if part.Get("type").String() != "tool_result" {
+			continue
+		}
+		toolUseID := strings.TrimSpace(part.Get("tool_use_id").String())
+		if toolUseID != "" {
+			result[toolUseID] = true
+		}
+	}
+	return result
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {

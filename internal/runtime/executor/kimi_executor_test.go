@@ -3,6 +3,8 @@ package executor
 import (
 	"testing"
 
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -201,5 +203,101 @@ func TestNormalizeKimiToolMessageLinks_RepairsIDsAndReasoningTogether(t *testing
 	}
 	if got := gjson.GetBytes(out, "messages.2.reasoning_content").String(); got != "r1" {
 		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "r1")
+	}
+}
+
+func TestDropUnansweredClaudeToolUses_RemovesMissingResults(t *testing.T) {
+	body := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"start"}]},
+			{"role":"assistant","content":[
+				{"type":"text","text":"reading files"},
+				{"type":"tool_use","id":"read_file:1","name":"read_file","input":{"path":"a.go"}},
+				{"type":"tool_use","id":"read_file:2","name":"read_file","input":{"path":"b.go"}},
+				{"type":"tool_use","id":"read_file:3","name":"read_file","input":{"path":"c.go"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"read_file:1","content":"a"},
+				{"type":"tool_result","tool_use_id":"read_file:2","content":"b"},
+				{"type":"text","text":"continue"}
+			]}
+		]
+	}`)
+
+	out, removed, err := dropUnansweredClaudeToolUses(body)
+	if err != nil {
+		t.Fatalf("dropUnansweredClaudeToolUses() error = %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	content := gjson.GetBytes(out, "messages.1.content")
+	if len(content.Array()) != 3 {
+		t.Fatalf("assistant content length = %d, want 3: %s", len(content.Array()), content.Raw)
+	}
+	if gjson.GetBytes(out, `messages.1.content.#(id=="read_file:3")`).Exists() {
+		t.Fatalf("unanswered tool_use read_file:3 should be removed: %s", content.Raw)
+	}
+	if !gjson.GetBytes(out, `messages.1.content.#(id=="read_file:1")`).Exists() {
+		t.Fatalf("answered tool_use read_file:1 should be kept: %s", content.Raw)
+	}
+	if !gjson.GetBytes(out, `messages.1.content.#(id=="read_file:2")`).Exists() {
+		t.Fatalf("answered tool_use read_file:2 should be kept: %s", content.Raw)
+	}
+}
+
+func TestDropUnansweredClaudeToolUses_DropsToolOnlyAssistantMessage(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"read_file:3","name":"read_file","input":{}}]},
+			{"role":"user","content":[{"type":"text","text":"no tool result"}]}
+		]
+	}`)
+
+	out, removed, err := dropUnansweredClaudeToolUses(body)
+	if err != nil {
+		t.Fatalf("dropUnansweredClaudeToolUses() error = %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 1 {
+		t.Fatalf("messages length = %d, want 1: %s", len(msgs), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := msgs[0].Get("role").String(); got != "user" {
+		t.Fatalf("remaining role = %q, want user", got)
+	}
+}
+
+func TestRepairKimiClaudeToolUseRequest_RepairsPayloadAndOriginal(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"read_file:1","name":"read_file","input":{}},
+				{"type":"tool_use","id":"read_file:2","name":"read_file","input":{}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"read_file:1","content":"ok"}]}
+		]
+	}`)
+	req := cliproxyexecutor.Request{Payload: body}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: body,
+	}
+
+	repairedReq, repairedOpts, err := repairKimiClaudeToolUseRequest(req, opts)
+	if err != nil {
+		t.Fatalf("repairKimiClaudeToolUseRequest() error = %v", err)
+	}
+
+	if gjson.GetBytes(repairedReq.Payload, `messages.0.content.#(id=="read_file:2")`).Exists() {
+		t.Fatalf("payload still has unanswered read_file:2: %s", repairedReq.Payload)
+	}
+	if gjson.GetBytes(repairedOpts.OriginalRequest, `messages.0.content.#(id=="read_file:2")`).Exists() {
+		t.Fatalf("original request still has unanswered read_file:2: %s", repairedOpts.OriginalRequest)
 	}
 }
