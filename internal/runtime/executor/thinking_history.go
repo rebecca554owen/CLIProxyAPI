@@ -11,17 +11,27 @@ import (
 )
 
 func normalizeThinkingHistory(body []byte, provider string) ([]byte, bool, bool, error) {
+	return normalizeThinkingHistoryForModel(body, provider, "")
+}
+
+func normalizeThinkingHistoryForModel(body []byte, provider string, model string) ([]byte, bool, bool, error) {
+	requireCompleteHistory := requiresReturnedThinkingHistory(model)
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "openai":
-		return normalizeOpenAIThinkingHistory(body)
+		return normalizeOpenAIThinkingHistory(body, requireCompleteHistory)
 	case "claude":
-		return normalizeClaudeThinkingHistory(body)
+		return normalizeClaudeThinkingHistory(body, requireCompleteHistory)
 	default:
 		return body, false, false, nil
 	}
 }
 
-func normalizeOpenAIThinkingHistory(body []byte) ([]byte, bool, bool, error) {
+func requiresReturnedThinkingHistory(model string) bool {
+	modelName := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	return strings.HasPrefix(modelName, "deepseek-v4") || strings.Contains(modelName, "deepseek-reasoner")
+}
+
+func normalizeOpenAIThinkingHistory(body []byte, requireCompleteHistory bool) ([]byte, bool, bool, error) {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body, false, false, nil
 	}
@@ -43,8 +53,11 @@ func normalizeOpenAIThinkingHistory(body []byte) ([]byte, bool, bool, error) {
 		if reasoning != "" {
 			latestReasoning = reasoning
 		}
-		toolCalls := msg.Get("tool_calls")
-		if !toolCalls.Exists() || !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
+		hasToolCalls := false
+		if toolCalls := msg.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+			hasToolCalls = true
+		}
+		if !requireCompleteHistory && !hasToolCalls {
 			continue
 		}
 		if reasoning != "" {
@@ -53,6 +66,9 @@ func normalizeOpenAIThinkingHistory(body []byte) ([]byte, bool, bool, error) {
 		fallback := latestReasoning
 		if fallback == "" {
 			fallback = assistantOpenAIText(msg)
+		}
+		if fallback == "" && requireCompleteHistory {
+			fallback = "[reasoning unavailable]"
 		}
 		if fallback == "" {
 			unrepaired++
@@ -81,7 +97,7 @@ func normalizeOpenAIThinkingHistory(body []byte) ([]byte, bool, bool, error) {
 	return out, patched > 0 || downgraded, downgraded, nil
 }
 
-func normalizeClaudeThinkingHistory(body []byte) ([]byte, bool, bool, error) {
+func normalizeClaudeThinkingHistory(body []byte, requireCompleteHistory bool) ([]byte, bool, bool, error) {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body, false, false, nil
 	}
@@ -100,7 +116,40 @@ func normalizeClaudeThinkingHistory(body []byte) ([]byte, bool, bool, error) {
 			continue
 		}
 		content := msg.Get("content")
-		if !content.Exists() || !content.IsArray() {
+		if !content.Exists() {
+			continue
+		}
+		if content.Type == gjson.String {
+			if !requireCompleteHistory {
+				continue
+			}
+			fallback := latestThinking
+			text := strings.TrimSpace(content.String())
+			if fallback == "" {
+				fallback = text
+			}
+			if fallback == "" {
+				fallback = "[thinking unavailable]"
+			}
+			rebuilt := []byte(`[]`)
+			block := []byte(`{"type":"thinking","thinking":""}`)
+			block, _ = sjson.SetBytes(block, "thinking", fallback)
+			rebuilt, _ = sjson.SetRawBytes(rebuilt, "-1", block)
+			if text != "" {
+				textBlock := []byte(`{"type":"text","text":""}`)
+				textBlock, _ = sjson.SetBytes(textBlock, "text", text)
+				rebuilt, _ = sjson.SetRawBytes(rebuilt, "-1", textBlock)
+			}
+			next, err := sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content", idx), rebuilt)
+			if err != nil {
+				return body, false, false, err
+			}
+			out = next
+			latestThinking = fallback
+			patched++
+			continue
+		}
+		if !content.IsArray() {
 			continue
 		}
 
@@ -124,12 +173,18 @@ func normalizeClaudeThinkingHistory(body []byte) ([]byte, bool, bool, error) {
 				hasToolUse = true
 			}
 		}
-		if !hasToolUse || hasThinking {
+		if hasThinking {
+			continue
+		}
+		if !requireCompleteHistory && !hasToolUse {
 			continue
 		}
 		fallback := latestThinking
 		if fallback == "" && len(textParts) > 0 {
 			fallback = strings.Join(textParts, "\n")
+		}
+		if fallback == "" && requireCompleteHistory {
+			fallback = "[thinking unavailable]"
 		}
 		if fallback == "" {
 			unrepaired++

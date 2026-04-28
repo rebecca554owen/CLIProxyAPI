@@ -114,7 +114,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	translated, _, _, err = normalizeThinkingHistory(translated, "openai")
+	translated, _, _, err = normalizeThinkingHistoryForModel(translated, "openai", baseModel)
 	if err != nil {
 		return resp, err
 	}
@@ -219,7 +219,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
-	translated, _, _, err = normalizeThinkingHistory(translated, "openai")
+	translated, _, _, err = normalizeThinkingHistoryForModel(translated, "openai", baseModel)
 	if err != nil {
 		return nil, err
 	}

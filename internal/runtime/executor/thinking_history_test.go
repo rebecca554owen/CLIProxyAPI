@@ -47,6 +47,49 @@ func TestNormalizeOpenAIThinkingHistoryDowngradesWhenUnrepairable(t *testing.T) 
 	}
 }
 
+func TestNormalizeOpenAIThinkingHistoryDeepSeekRepairsPlainAssistant(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"previous answer"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out, changed, downgraded, err := normalizeThinkingHistoryForModel(body, "openai", "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("normalizeThinkingHistoryForModel() error = %v", err)
+	}
+	if !changed {
+		t.Fatalf("normalizeThinkingHistoryForModel() should change DeepSeek history")
+	}
+	if downgraded {
+		t.Fatalf("normalizeThinkingHistoryForModel() downgraded unexpectedly")
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "previous answer" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "previous answer")
+	}
+}
+
+func TestNormalizeOpenAIThinkingHistoryKeepsPlainAssistantForOtherModels(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"previous answer"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out, changed, downgraded, err := normalizeThinkingHistoryForModel(body, "openai", "gpt-5")
+	if err != nil {
+		t.Fatalf("normalizeThinkingHistoryForModel() error = %v", err)
+	}
+	if changed || downgraded {
+		t.Fatalf("normalizeThinkingHistoryForModel() changed generic history unexpectedly: changed=%v downgraded=%v body=%s", changed, downgraded, string(out))
+	}
+	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
+		t.Fatalf("messages.0.reasoning_content should not be added for generic models")
+	}
+}
+
 func TestNormalizeClaudeThinkingHistoryRepairsFromText(t *testing.T) {
 	body := []byte(`{
 		"thinking":{"type":"enabled","budget_tokens":1024},
@@ -92,5 +135,56 @@ func TestNormalizeClaudeThinkingHistoryDowngradesWhenUnrepairable(t *testing.T) 
 	}
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed")
+	}
+}
+
+func TestNormalizeClaudeThinkingHistoryDeepSeekRepairsPlainTextBlock(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"text","text":"previous answer"}]},
+			{"role":"user","content":[{"type":"text","text":"continue"}]}
+		]
+	}`)
+
+	out, changed, downgraded, err := normalizeThinkingHistoryForModel(body, "claude", "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("normalizeThinkingHistoryForModel() error = %v", err)
+	}
+	if !changed {
+		t.Fatalf("normalizeThinkingHistoryForModel() should change DeepSeek history")
+	}
+	if downgraded {
+		t.Fatalf("normalizeThinkingHistoryForModel() downgraded unexpectedly")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "thinking" {
+		t.Fatalf("messages.0.content.0.type = %q, want %q", got, "thinking")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.thinking").String(); got != "previous answer" {
+		t.Fatalf("messages.0.content.0.thinking = %q, want %q", got, "previous answer")
+	}
+}
+
+func TestNormalizeClaudeThinkingHistoryDeepSeekConvertsStringContent(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"previous answer"}
+		]
+	}`)
+
+	out, changed, downgraded, err := normalizeThinkingHistoryForModel(body, "claude", "deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("normalizeThinkingHistoryForModel() error = %v", err)
+	}
+	if !changed {
+		t.Fatalf("normalizeThinkingHistoryForModel() should change DeepSeek string content history")
+	}
+	if downgraded {
+		t.Fatalf("normalizeThinkingHistoryForModel() downgraded unexpectedly")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.thinking").String(); got != "previous answer" {
+		t.Fatalf("messages.0.content.0.thinking = %q, want %q", got, "previous answer")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.text").String(); got != "previous answer" {
+		t.Fatalf("messages.0.content.1.text = %q, want %q", got, "previous answer")
 	}
 }
