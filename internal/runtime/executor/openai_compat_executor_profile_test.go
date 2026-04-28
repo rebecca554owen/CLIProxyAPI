@@ -191,3 +191,123 @@ func TestOpenAICompatExecutorStreamScrubsUnsupportedFieldsForProfile(t *testing.
 		}
 	}
 }
+
+func TestOpenAICompatPayloadDeepSeekStripsStrictOutsideBeta(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"lookup",
+				"description":"Lookup records",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"properties":{"query":{"type":"string"}},
+					"additionalProperties":false
+				}
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/v1")
+
+	if gjson.GetBytes(out, "tools.0.function.strict").Exists() {
+		t.Fatalf("strict should be removed outside beta endpoint: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.query.type").String(); got != "string" {
+		t.Fatalf("parameters were not preserved, got query.type=%q payload=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function; payload=%s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDeepSeekConvertsInputSchemaTools(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"read_file",
+			"description":"Read a file",
+			"input_schema":{
+				"type":"object",
+				"properties":{"path":{"type":"string"}},
+				"required":["path"]
+			},
+			"strict":true
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/v1")
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function; payload=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "read_file" {
+		t.Fatalf("tool name = %q, want read_file; payload=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.input_schema").Exists() {
+		t.Fatalf("input_schema should be converted away: %s", string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.function.strict").Exists() {
+		t.Fatalf("strict should be removed outside beta endpoint: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.path.type").String(); got != "string" {
+		t.Fatalf("converted parameters missing path type, got %q payload=%s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDeepSeekKeepsStrictOnBetaAndNormalizesSchema(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"lookup",
+				"description":"Lookup records",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string"},
+						"limit":{"type":"integer"}
+					},
+					"required":["query"]
+				}
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/beta")
+
+	if got := gjson.GetBytes(out, "tools.0.function.strict").Bool(); !got {
+		t.Fatalf("strict should be kept on beta endpoint: %s", string(out))
+	}
+	additionalProperties := gjson.GetBytes(out, "tools.0.function.parameters.additionalProperties")
+	if !additionalProperties.Exists() {
+		t.Fatalf("additionalProperties=false should be present in strict schema: %s", string(out))
+	}
+	if additionalProperties.Raw != "false" {
+		t.Fatalf("additionalProperties should be false, got %s: %s", additionalProperties.Raw, string(out))
+	}
+	if !requiredContains(out, "tools.0.function.parameters.required", "query") ||
+		!requiredContains(out, "tools.0.function.parameters.required", "limit") {
+		t.Fatalf("strict schema should require all object properties: %s", string(out))
+	}
+}
+
+func requiredContains(payload []byte, path string, want string) bool {
+	values := gjson.GetBytes(payload, path)
+	if !values.IsArray() {
+		return false
+	}
+	for _, value := range values.Array() {
+		if value.String() == want {
+			return true
+		}
+	}
+	return false
+}

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -182,6 +184,193 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 		payload = deleteMessageReasoningContent(payload)
 	}
 	return payload
+}
+
+func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfile, model string, baseURL string) []byte {
+	payload = scrubOpenAICompatPayload(payload, profile)
+	if requiresDeepSeekToolSchemaCompatibility(model) {
+		payload = scrubDeepSeekToolPayload(payload, baseURL)
+	}
+	return payload
+}
+
+func requiresDeepSeekToolSchemaCompatibility(model string) bool {
+	modelName := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(modelName, "deepseek-v4")
+}
+
+func scrubDeepSeekToolPayload(payload []byte, baseURL string) []byte {
+	if len(payload) == 0 || !gjson.GetBytes(payload, "tools").IsArray() {
+		return payload
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	tools, ok := root["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return payload
+	}
+
+	keepStrict := deepSeekBaseURLUsesBeta(baseURL) && allDeepSeekFunctionToolsStrict(tools)
+	cleanedTools := make([]any, 0, len(tools))
+	changed := false
+	for _, rawTool := range tools {
+		cleaned, ok := normalizeDeepSeekTool(rawTool, keepStrict)
+		if !ok {
+			cleanedTools = append(cleanedTools, rawTool)
+			continue
+		}
+		cleanedTools = append(cleanedTools, cleaned)
+		if !jsonValuesEqual(rawTool, cleaned) {
+			changed = true
+		}
+	}
+	if !changed {
+		return payload
+	}
+
+	root["tools"] = cleanedTools
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return payload
+	}
+	return out
+}
+
+func deepSeekBaseURLUsesBeta(baseURL string) bool {
+	baseURL = strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	return strings.HasSuffix(baseURL, "/beta")
+}
+
+func allDeepSeekFunctionToolsStrict(tools []any) bool {
+	foundFunction := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		function := deepSeekFunctionToolNode(tool)
+		if function == nil {
+			continue
+		}
+		foundFunction = true
+		if strict, _ := function["strict"].(bool); strict {
+			continue
+		}
+		if strict, _ := tool["strict"].(bool); strict {
+			continue
+		}
+		return false
+	}
+	return foundFunction
+}
+
+func normalizeDeepSeekTool(rawTool any, keepStrict bool) (map[string]any, bool) {
+	tool, ok := rawTool.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+
+	function := deepSeekFunctionToolNode(tool)
+	if function == nil {
+		return nil, false
+	}
+
+	name, ok := util.NormalizeRequestToolName(compatStringValue(function["name"]), nil)
+	if !ok {
+		name, ok = util.NormalizeRequestToolName(compatStringValue(tool["name"]), nil)
+	}
+	if !ok {
+		return nil, false
+	}
+
+	normalizedFunction := map[string]any{"name": name}
+	if description := compatStringValue(function["description"]); strings.TrimSpace(description) != "" {
+		normalizedFunction["description"] = description
+	} else if fallback := compatStringValue(tool["description"]); strings.TrimSpace(fallback) != "" {
+		normalizedFunction["description"] = fallback
+	}
+
+	parameters, parametersRaw := deepSeekToolParameters(function, tool)
+	if keepStrict {
+		normalizedFunction["parameters"] = schemaValueFromString(util.CleanJSONSchemaForOpenAIStructuredOutput(parametersRaw))
+		normalizedFunction["strict"] = true
+	} else {
+		normalizedFunction["parameters"] = parameters
+	}
+
+	return map[string]any{
+		"type":     "function",
+		"function": normalizedFunction,
+	}, true
+}
+
+func deepSeekFunctionToolNode(tool map[string]any) map[string]any {
+	if function, ok := tool["function"].(map[string]any); ok {
+		return function
+	}
+	if _, hasName := tool["name"]; !hasName {
+		return nil
+	}
+	if _, hasInputSchema := tool["input_schema"]; hasInputSchema {
+		return tool
+	}
+	if _, hasParameters := tool["parameters"]; hasParameters {
+		return tool
+	}
+	if toolType := strings.TrimSpace(compatStringValue(tool["type"])); toolType == "" || toolType == "function" {
+		return tool
+	}
+	return nil
+}
+
+func deepSeekToolParameters(function map[string]any, tool map[string]any) (any, string) {
+	for _, candidate := range []any{
+		function["parameters"],
+		function["parametersJsonSchema"],
+		tool["parameters"],
+		tool["input_schema"],
+		tool["parametersJsonSchema"],
+	} {
+		if candidate == nil {
+			continue
+		}
+		raw, err := json.Marshal(candidate)
+		if err != nil || !gjson.ValidBytes(raw) {
+			continue
+		}
+		return candidate, string(raw)
+	}
+	defaultSchema := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+	raw, _ := json.Marshal(defaultSchema)
+	return defaultSchema, string(raw)
+}
+
+func schemaValueFromString(raw string) any {
+	var parsed any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}
+	}
+	return parsed
+}
+
+func compatStringValue(value any) string {
+	str, _ := value.(string)
+	return str
+}
+
+func jsonValuesEqual(left any, right any) bool {
+	leftJSON, errLeft := json.Marshal(left)
+	rightJSON, errRight := json.Marshal(right)
+	return errLeft == nil && errRight == nil && string(leftJSON) == string(rightJSON)
 }
 
 func deleteMessageReasoningContent(payload []byte) []byte {

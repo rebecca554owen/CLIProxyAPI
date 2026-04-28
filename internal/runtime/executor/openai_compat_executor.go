@@ -119,7 +119,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	translated = e.overrideModel(translated, baseModel)
-	translated = scrubOpenAICompatPayload(translated, profile)
+	translated = scrubOpenAICompatPayloadForModel(translated, profile, baseModel, baseURL)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -229,7 +229,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// are captured even when the upstream is an OpenAI-compatible provider.
 		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	}
-	translated = scrubOpenAICompatPayload(translated, profile)
+	translated = scrubOpenAICompatPayloadForModel(translated, profile, baseModel, baseURL)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -338,6 +338,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	profile := e.resolveProfile(auth)
+	baseURL, _ := e.resolveCredentials(auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -350,7 +351,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 		return cliproxyexecutor.Response{}, err
 	}
 	translated = e.overrideModel(translated, modelForCounting)
-	translated = scrubOpenAICompatPayload(translated, profile)
+	translated = scrubOpenAICompatPayloadForModel(translated, profile, baseModel, baseURL)
 
 	enc, err := helps.TokenizerForModel(modelForCounting)
 	if err != nil {
