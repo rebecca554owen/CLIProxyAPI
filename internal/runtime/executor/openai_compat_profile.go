@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -126,14 +127,46 @@ func (e *OpenAICompatExecutor) resolveProfile(auth *cliproxyauth.Auth) openAICom
 			if kind := config.NormalizeOpenAICompatibilityKind(auth.Attributes["compat_kind"]); kind != "" {
 				return openAICompatProfileForKind(kind)
 			}
+			if kind := inferOpenAICompatKindFromBaseURL(auth.Attributes["base_url"]); kind != "" {
+				return openAICompatProfileForKind(kind)
+			}
 		}
 		return profile
 	}
 	resolved := openAICompatProfileForKind(compat.Kind)
+	if resolved.Kind == "" && auth != nil && auth.Attributes != nil {
+		if kind := inferOpenAICompatKindFromBaseURL(auth.Attributes["base_url"]); kind != "" {
+			resolved = openAICompatProfileForKind(kind)
+		}
+	}
 	if len(compat.Headers) > 0 {
 		resolved.DefaultHeaders = config.NormalizeHeaders(compat.Headers)
 	}
 	return resolved
+}
+
+func inferOpenAICompatKindFromBaseURL(rawBaseURL string) string {
+	baseURL := strings.TrimSpace(rawBaseURL)
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	switch host {
+	case "api.moonshot.ai", "api.kimi.com":
+		return "kimi"
+	case "api.minimax.io", "api.minimaxi.io", "api.minimaxi.com":
+		return "minimax"
+	case "api.z.ai", "open.bigmodel.cn", "maas-api.lanyun.net":
+		return "zhipu"
+	case "api.deepseek.com":
+		return "deepseek"
+	default:
+		return ""
+	}
 }
 
 func applyOpenAICompatDefaultHeaders(req *http.Request, profile openAICompatProfile) {
@@ -188,10 +221,220 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 
 func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfile, model string, baseURL string) []byte {
 	payload = scrubOpenAICompatPayload(payload, profile)
+	payload = repairOpenAICompatToolCallHistory(payload)
+	payload = scrubOpenAICompatProviderToolPayload(payload, profile)
+	payload = scrubOpenAICompatToolChoice(payload, profile)
 	if requiresDeepSeekToolSchemaCompatibility(model) {
 		payload = scrubDeepSeekToolPayload(payload, baseURL)
 	}
 	return payload
+}
+
+func scrubOpenAICompatProviderToolPayload(payload []byte, profile openAICompatProfile) []byte {
+	switch config.NormalizeOpenAICompatibilityKind(profile.Kind) {
+	case "kimi", "minimax", "zhipu":
+		return scrubOpenAICompatFunctionToolPayload(payload, profile)
+	default:
+		return payload
+	}
+}
+
+func scrubOpenAICompatFunctionToolPayload(payload []byte, profile openAICompatProfile) []byte {
+	if len(payload) == 0 || !gjson.GetBytes(payload, "tools").IsArray() {
+		return payload
+	}
+	profileKind := config.NormalizeOpenAICompatibilityKind(profile.Kind)
+
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	tools, ok := root["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return payload
+	}
+
+	cleanedTools := make([]any, 0, len(tools))
+	changed := false
+	for _, rawTool := range tools {
+		cleaned, ok := normalizeDeepSeekTool(rawTool, false)
+		if !ok {
+			cleanedTools = append(cleanedTools, rawTool)
+			continue
+		}
+		if profileKind == "kimi" {
+			if function, okFunction := cleaned["function"].(map[string]any); okFunction {
+				function["strict"] = false
+			}
+		}
+		cleanedTools = append(cleanedTools, cleaned)
+		if !jsonValuesEqual(rawTool, cleaned) {
+			changed = true
+		}
+	}
+	if !changed {
+		return payload
+	}
+
+	root["tools"] = cleanedTools
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return payload
+	}
+	return out
+}
+
+func scrubOpenAICompatToolChoice(payload []byte, profile openAICompatProfile) []byte {
+	if config.NormalizeOpenAICompatibilityKind(profile.Kind) != "zhipu" {
+		return payload
+	}
+	toolChoice := gjson.GetBytes(payload, "tool_choice")
+	if !toolChoice.Exists() {
+		return payload
+	}
+	if !gjson.GetBytes(payload, "tools").IsArray() {
+		if out, err := sjson.DeleteBytes(payload, "tool_choice"); err == nil {
+			return out
+		}
+		return payload
+	}
+	if toolChoice.Type == gjson.String && strings.EqualFold(strings.TrimSpace(toolChoice.String()), "auto") {
+		return payload
+	}
+	out, err := sjson.SetBytes(payload, "tool_choice", "auto")
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+func repairOpenAICompatToolCallHistory(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.GetBytes(payload, "messages").IsArray() {
+		return payload
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	messages, ok := root["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return payload
+	}
+
+	repaired := make([]any, 0, len(messages))
+	changed := false
+	var pending map[string]bool
+	for idx, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			repaired = append(repaired, rawMessage)
+			pending = nil
+			continue
+		}
+
+		role := strings.TrimSpace(compatStringValue(message["role"]))
+		if role == "tool" {
+			toolCallID := strings.TrimSpace(compatStringValue(message["tool_call_id"]))
+			if pending != nil && pending[toolCallID] {
+				repaired = append(repaired, message)
+				delete(pending, toolCallID)
+			} else {
+				changed = true
+			}
+			continue
+		}
+
+		pending = nil
+		if role != "assistant" {
+			repaired = append(repaired, message)
+			continue
+		}
+
+		toolCalls, ok := message["tool_calls"].([]any)
+		if !ok || len(toolCalls) == 0 {
+			repaired = append(repaired, message)
+			continue
+		}
+
+		nextToolResults := openAICompatToolResultIDsInNextMessages(messages, idx)
+		keptToolCalls := make([]any, 0, len(toolCalls))
+		keptIDs := make(map[string]bool)
+		for _, rawToolCall := range toolCalls {
+			toolCallID := strings.TrimSpace(openAICompatToolCallID(rawToolCall))
+			if toolCallID == "" || !nextToolResults[toolCallID] {
+				changed = true
+				continue
+			}
+			keptToolCalls = append(keptToolCalls, rawToolCall)
+			keptIDs[toolCallID] = true
+		}
+
+		if len(keptToolCalls) == 0 {
+			delete(message, "tool_calls")
+			if !openAICompatMessageHasContent(message) {
+				changed = true
+				continue
+			}
+			repaired = append(repaired, message)
+			continue
+		}
+		if len(keptToolCalls) != len(toolCalls) {
+			message["tool_calls"] = keptToolCalls
+		}
+		repaired = append(repaired, message)
+		pending = keptIDs
+	}
+
+	if !changed {
+		return payload
+	}
+	root["messages"] = repaired
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return payload
+	}
+	return out
+}
+
+func openAICompatToolResultIDsInNextMessages(messages []any, assistantIdx int) map[string]bool {
+	result := make(map[string]bool)
+	for idx := assistantIdx + 1; idx < len(messages); idx++ {
+		message, ok := messages[idx].(map[string]any)
+		if !ok {
+			break
+		}
+		if strings.TrimSpace(compatStringValue(message["role"])) != "tool" {
+			break
+		}
+		if toolCallID := strings.TrimSpace(compatStringValue(message["tool_call_id"])); toolCallID != "" {
+			result[toolCallID] = true
+		}
+	}
+	return result
+}
+
+func openAICompatToolCallID(rawToolCall any) string {
+	toolCall, ok := rawToolCall.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return compatStringValue(toolCall["id"])
+}
+
+func openAICompatMessageHasContent(message map[string]any) bool {
+	content, ok := message["content"]
+	if !ok || content == nil {
+		return false
+	}
+	switch v := content.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []any:
+		return len(v) > 0
+	default:
+		return true
+	}
 }
 
 func requiresDeepSeekToolSchemaCompatibility(model string) bool {
@@ -278,9 +521,9 @@ func normalizeDeepSeekTool(rawTool any, keepStrict bool) (map[string]any, bool) 
 		return nil, false
 	}
 
-	name, ok := util.NormalizeRequestToolName(compatStringValue(function["name"]), nil)
+	name, ok := normalizeOpenAICompatFunctionName(compatStringValue(function["name"]))
 	if !ok {
-		name, ok = util.NormalizeRequestToolName(compatStringValue(tool["name"]), nil)
+		name, ok = normalizeOpenAICompatFunctionName(compatStringValue(tool["name"]))
 	}
 	if !ok {
 		return nil, false
@@ -337,11 +580,12 @@ func deepSeekToolParameters(function map[string]any, tool map[string]any) (any, 
 		if candidate == nil {
 			continue
 		}
-		raw, err := json.Marshal(candidate)
+		normalized := normalizeOpenAICompatParameters(candidate)
+		raw, err := json.Marshal(normalized)
 		if err != nil || !gjson.ValidBytes(raw) {
 			continue
 		}
-		return candidate, string(raw)
+		return normalized, string(raw)
 	}
 	defaultSchema := map[string]any{
 		"type":       "object",
@@ -349,6 +593,28 @@ func deepSeekToolParameters(function map[string]any, tool map[string]any) (any, 
 	}
 	raw, _ := json.Marshal(defaultSchema)
 	return defaultSchema, string(raw)
+}
+
+func normalizeOpenAICompatParameters(parameters any) any {
+	schema, ok := parameters.(map[string]any)
+	if !ok {
+		return parameters
+	}
+	out := make(map[string]any, len(schema)+2)
+	for key, value := range schema {
+		out[key] = value
+	}
+	schemaType := strings.TrimSpace(compatStringValue(out["type"]))
+	if schemaType == "" {
+		schemaType = "object"
+		out["type"] = schemaType
+	}
+	if schemaType == "object" {
+		if _, okProperties := out["properties"]; !okProperties {
+			out["properties"] = map[string]any{}
+		}
+	}
+	return out
 }
 
 func schemaValueFromString(raw string) any {
@@ -365,6 +631,46 @@ func schemaValueFromString(raw string) any {
 func compatStringValue(value any) string {
 	str, _ := value.(string)
 	return str
+}
+
+func normalizeOpenAICompatFunctionName(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '_' || r == '-':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+
+	normalized := builder.String()
+	if normalized == "" {
+		return "", false
+	}
+	first := normalized[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		normalized = "_" + normalized
+	}
+	if len(normalized) > 64 {
+		normalized = normalized[:64]
+	}
+	for len(normalized) < 3 {
+		normalized += "_"
+	}
+	return normalized, true
 }
 
 func jsonValuesEqual(left any, right any) bool {

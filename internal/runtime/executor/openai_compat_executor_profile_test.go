@@ -192,6 +192,127 @@ func TestOpenAICompatExecutorStreamScrubsUnsupportedFieldsForProfile(t *testing.
 	}
 }
 
+func TestInferOpenAICompatKindFromBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{name: "kimi moonshot", baseURL: "https://api.moonshot.ai/v1", want: "kimi"},
+		{name: "kimi coding", baseURL: "https://api.kimi.com/coding/v1", want: "kimi"},
+		{name: "minimax openai", baseURL: "https://api.minimax.io/v1", want: "minimax"},
+		{name: "zhipu coding", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4", want: "zhipu"},
+		{name: "zai", baseURL: "https://api.z.ai/api/paas/v4", want: "zhipu"},
+		{name: "deepseek", baseURL: "https://api.deepseek.com/v1", want: "deepseek"},
+		{name: "unknown", baseURL: "https://example.com/v1", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inferOpenAICompatKindFromBaseURL(tt.baseURL); got != tt.want {
+				t.Fatalf("inferOpenAICompatKindFromBaseURL(%q) = %q, want %q", tt.baseURL, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatPayloadRepairsUnansweredToolCalls(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[
+			{"role":"user","content":"start"},
+			{"role":"assistant","content":"will call tools","tool_calls":[
+				{"id":"call_01","type":"function","function":{"name":"read_file","arguments":"{}"}},
+				{"id":"call_02","type":"function","function":{"name":"glob","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_01","content":"ok"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.moonshot.ai/v1")
+
+	if got := len(gjson.GetBytes(out, "messages.1.tool_calls").Array()); got != 1 {
+		t.Fatalf("tool_calls length = %d, want 1: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, `messages.1.tool_calls.#(id=="call_02")`).Exists() {
+		t.Fatalf("unanswered call_02 should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != "call_01" {
+		t.Fatalf("kept tool result id = %q, want call_01: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDropsToolOnlyAssistantMessage(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_01","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.moonshot.ai/v1")
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1: %s", len(messages), string(out))
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("remaining role = %q, want user: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadKimiNormalizesToolsAndDisablesStrict(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"read:file",
+			"description":"Read a file",
+			"input_schema":{
+				"type":"object",
+				"properties":{"path":{"type":"string"}},
+				"required":["path"]
+			},
+			"strict":true
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.moonshot.ai/v1")
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "read_file" {
+		t.Fatalf("tool name = %q, want read_file: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.strict").Bool(); got {
+		t.Fatalf("kimi strict should be disabled for schema compatibility: %s", string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.input_schema").Exists() {
+		t.Fatalf("input_schema should be converted away: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.path.type").String(); got != "string" {
+		t.Fatalf("converted parameters missing path type, got %q: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadZhipuForcesAutoToolChoice(t *testing.T) {
+	payload := []byte(`{
+		"model":"glm-4.6",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{}}}}],
+		"tool_choice":"required"
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("zhipu"), "glm-4.6", "https://open.bigmodel.cn/api/paas/v4")
+
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto: %s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadDeepSeekStripsStrictOutsideBeta(t *testing.T) {
 	payload := []byte(`{
 		"model":"deepseek-v4-pro",
