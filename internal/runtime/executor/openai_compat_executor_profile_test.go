@@ -192,6 +192,79 @@ func TestOpenAICompatExecutorStreamScrubsUnsupportedFieldsForProfile(t *testing.
 	}
 }
 
+func TestOpenAICompatExecutorClaudeSourceNormalizesKimiToolReferences(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"kimi-k2.6","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("kimi-provider", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name: "kimi-provider",
+			Kind: "kimi",
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "kimi-provider",
+		"compat_kind": "kimi",
+	}}
+
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"max_tokens":1024,
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"read it"}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read:file","input":{"path":"/tmp/a.txt"}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"ok"},
+				{"type":"text","text":"continue"}
+			]}
+		],
+		"tools":[{
+			"name":"read:file",
+			"description":"Read a file",
+			"input_schema":{
+				"type":"object",
+				"properties":{"path":{"type":"string"}},
+				"required":["path"]
+			}
+		}],
+		"tool_choice":{"type":"tool","name":"read:file"}
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function: %s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tools.0.function.name").String(); got != "read_file" {
+		t.Fatalf("tool name = %q, want read_file: %s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.function.name").String(); got != "read_file" {
+		t.Fatalf("tool_choice name = %q, want read_file: %s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.1.tool_calls.0.function.name").String(); got != "read_file" {
+		t.Fatalf("tool_call name = %q, want read_file: %s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "tools.0.input_schema").Exists() {
+		t.Fatalf("input_schema should be converted away: %s", string(gotBody))
+	}
+}
+
 func TestInferOpenAICompatKindFromBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -310,6 +383,30 @@ func TestOpenAICompatPayloadZhipuForcesAutoToolChoice(t *testing.T) {
 
 	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
 		t.Fatalf("tool_choice = %q, want auto: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadNormalizesFunctionNameReferences(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read:file","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		],
+		"tools":[{"type":"function","function":{"name":"read:file","parameters":{"type":"object","properties":{}}}}],
+		"tool_choice":{"type":"function","function":{"name":"read:file"}}
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.moonshot.ai/v1")
+
+	for _, path := range []string{
+		"tools.0.function.name",
+		"tool_choice.function.name",
+		"messages.0.tool_calls.0.function.name",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != "read_file" {
+			t.Fatalf("%s = %q, want read_file: %s", path, got, string(out))
+		}
 	}
 }
 

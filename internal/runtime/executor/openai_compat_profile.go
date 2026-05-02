@@ -255,6 +255,7 @@ func scrubOpenAICompatFunctionToolPayload(payload []byte, profile openAICompatPr
 	}
 
 	cleanedTools := make([]any, 0, len(tools))
+	nameMapping := make(map[string]string)
 	changed := false
 	for _, rawTool := range tools {
 		cleaned, ok := normalizeDeepSeekTool(rawTool, false)
@@ -267,10 +268,18 @@ func scrubOpenAICompatFunctionToolPayload(payload []byte, profile openAICompatPr
 				function["strict"] = false
 			}
 		}
+		if originalName := openAICompatOriginalFunctionName(rawTool); originalName != "" {
+			if normalizedName := openAICompatNormalizedFunctionName(cleaned); normalizedName != "" && normalizedName != originalName {
+				nameMapping[originalName] = normalizedName
+			}
+		}
 		cleanedTools = append(cleanedTools, cleaned)
 		if !jsonValuesEqual(rawTool, cleaned) {
 			changed = true
 		}
+	}
+	if rewriteOpenAICompatFunctionNameReferences(root, nameMapping) {
+		changed = true
 	}
 	if !changed {
 		return payload
@@ -458,6 +467,7 @@ func scrubDeepSeekToolPayload(payload []byte, baseURL string) []byte {
 
 	keepStrict := deepSeekBaseURLUsesBeta(baseURL) && allDeepSeekFunctionToolsStrict(tools)
 	cleanedTools := make([]any, 0, len(tools))
+	nameMapping := make(map[string]string)
 	changed := false
 	for _, rawTool := range tools {
 		cleaned, ok := normalizeDeepSeekTool(rawTool, keepStrict)
@@ -465,10 +475,18 @@ func scrubDeepSeekToolPayload(payload []byte, baseURL string) []byte {
 			cleanedTools = append(cleanedTools, rawTool)
 			continue
 		}
+		if originalName := openAICompatOriginalFunctionName(rawTool); originalName != "" {
+			if normalizedName := openAICompatNormalizedFunctionName(cleaned); normalizedName != "" && normalizedName != originalName {
+				nameMapping[originalName] = normalizedName
+			}
+		}
 		cleanedTools = append(cleanedTools, cleaned)
 		if !jsonValuesEqual(rawTool, cleaned) {
 			changed = true
 		}
+	}
+	if rewriteOpenAICompatFunctionNameReferences(root, nameMapping) {
+		changed = true
 	}
 	if !changed {
 		return payload
@@ -548,6 +566,91 @@ func normalizeDeepSeekTool(rawTool any, keepStrict bool) (map[string]any, bool) 
 		"type":     "function",
 		"function": normalizedFunction,
 	}, true
+}
+
+func openAICompatOriginalFunctionName(rawTool any) string {
+	tool, ok := rawTool.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if function, okFunction := tool["function"].(map[string]any); okFunction {
+		if name := strings.TrimSpace(compatStringValue(function["name"])); name != "" {
+			return name
+		}
+	}
+	return strings.TrimSpace(compatStringValue(tool["name"]))
+}
+
+func openAICompatNormalizedFunctionName(tool map[string]any) string {
+	if tool == nil {
+		return ""
+	}
+	function, ok := tool["function"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(compatStringValue(function["name"]))
+}
+
+func rewriteOpenAICompatFunctionNameReferences(root map[string]any, mapping map[string]string) bool {
+	if len(mapping) == 0 {
+		return false
+	}
+	changed := false
+	rename := func(value any) (string, bool) {
+		name := strings.TrimSpace(compatStringValue(value))
+		if name == "" {
+			return "", false
+		}
+		mapped := mapping[name]
+		if mapped == "" || mapped == name {
+			return "", false
+		}
+		return mapped, true
+	}
+
+	if toolChoice, ok := root["tool_choice"].(map[string]any); ok {
+		if mapped, okMap := rename(toolChoice["name"]); okMap {
+			toolChoice["name"] = mapped
+			changed = true
+		}
+		if function, okFunction := toolChoice["function"].(map[string]any); okFunction {
+			if mapped, okMap := rename(function["name"]); okMap {
+				function["name"] = mapped
+				changed = true
+			}
+		}
+	}
+
+	messages, ok := root["messages"].([]any)
+	if !ok {
+		return changed
+	}
+	for _, rawMessage := range messages {
+		message, okMessage := rawMessage.(map[string]any)
+		if !okMessage {
+			continue
+		}
+		toolCalls, okToolCalls := message["tool_calls"].([]any)
+		if !okToolCalls {
+			continue
+		}
+		for _, rawToolCall := range toolCalls {
+			toolCall, okToolCall := rawToolCall.(map[string]any)
+			if !okToolCall {
+				continue
+			}
+			function, okFunction := toolCall["function"].(map[string]any)
+			if !okFunction {
+				continue
+			}
+			if mapped, okMap := rename(function["name"]); okMap {
+				function["name"] = mapped
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func deepSeekFunctionToolNode(tool map[string]any) map[string]any {
