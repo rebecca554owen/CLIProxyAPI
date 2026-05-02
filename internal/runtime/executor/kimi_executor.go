@@ -328,7 +328,7 @@ func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
-	repaired, removed, err := dropUnansweredClaudeToolUses(req.Payload)
+	repaired, err := repairClaudeToolUseHistory(req.Payload, "kimi")
 	if err != nil {
 		return req, opts, err
 	}
@@ -342,10 +342,21 @@ func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxye
 		opts.OriginalRequest = original
 	}
 
-	if removed > 0 {
-		log.WithField("removed_tool_uses", removed).Warn("kimi executor: dropped unanswered Claude tool_use history")
-	}
 	return req, opts, nil
+}
+
+func repairClaudeToolUseHistory(body []byte, executorName string) ([]byte, error) {
+	repaired, removed, err := dropUnansweredClaudeToolUses(body)
+	if err != nil {
+		return body, err
+	}
+	if removed > 0 {
+		log.WithFields(log.Fields{
+			"executor":          executorName,
+			"removed_tool_uses": removed,
+		}).Warn("dropped unanswered Claude tool_use history")
+	}
+	return repaired, nil
 }
 
 func dropUnansweredClaudeToolUses(body []byte) ([]byte, int, error) {
@@ -402,7 +413,7 @@ func dropUnansweredClaudeToolUses(body []byte) ([]byte, int, error) {
 
 		msgOut, err := sjson.SetRawBytes([]byte(msg.Raw), "content", contentOut)
 		if err != nil {
-			return body, 0, fmt.Errorf("kimi executor: failed to drop unanswered Claude tool_use: %w", err)
+			return body, 0, fmt.Errorf("failed to drop unanswered Claude tool_use: %w", err)
 		}
 		outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgOut)
 	}
@@ -413,7 +424,7 @@ func dropUnansweredClaudeToolUses(body []byte) ([]byte, int, error) {
 
 	out, err := sjson.SetRawBytes(body, "messages", outMessages)
 	if err != nil {
-		return body, 0, fmt.Errorf("kimi executor: failed to update Claude messages: %w", err)
+		return body, 0, fmt.Errorf("failed to update Claude messages: %w", err)
 	}
 	return out, removed, nil
 }

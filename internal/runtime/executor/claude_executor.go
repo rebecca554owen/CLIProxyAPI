@@ -186,6 +186,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body, err = repairClaudeToolUseHistory(body, "claude")
+	if err != nil {
+		return resp, err
+	}
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -379,6 +383,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 	body, _, _, err = normalizeThinkingHistoryForModel(body, "claude", baseModel)
+	if err != nil {
+		return nil, err
+	}
+	body, err = repairClaudeToolUseHistory(body, "claude")
 	if err != nil {
 		return nil, err
 	}

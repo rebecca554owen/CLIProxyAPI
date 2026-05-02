@@ -1196,6 +1196,59 @@ func TestClaudeExecutor_Execute_SanitizesInvalidToolNamesForAPIKeyUpstream(t *te
 	}
 }
 
+func TestClaudeExecutor_Execute_DropsUnansweredToolUseHistory(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"start"}]},
+			{"role":"assistant","content":[
+				{"type":"text","text":"will use tools"},
+				{"type":"tool_use","id":"call_01_vp6YvKjZbis7ayYMkHUTn76a","name":"read_file","input":{}},
+				{"type":"tool_use","id":"call_02_HV14reYsv1LuKOdMKLX3dKMM","name":"glob","input":{}}
+			]},
+			{"role":"user","content":[{"type":"text","text":"continue without tool results"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if strings.Contains(string(seenBody), "call_01_vp6YvKjZbis7ayYMkHUTn76a") {
+		t.Fatalf("upstream body still has unanswered call_01 tool_use: %s", seenBody)
+	}
+	if strings.Contains(string(seenBody), "call_02_HV14reYsv1LuKOdMKLX3dKMM") {
+		t.Fatalf("upstream body still has unanswered call_02 tool_use: %s", seenBody)
+	}
+	if !strings.Contains(string(seenBody), "will use tools") {
+		t.Fatalf("upstream body should keep original assistant text: %s", seenBody)
+	}
+	if !strings.Contains(string(seenBody), "continue without tool results") {
+		t.Fatalf("upstream body should keep original user text: %s", seenBody)
+	}
+}
+
 func TestClaudeExecutor_HttpRequest_SanitizesDirectMessagesToolNames(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
