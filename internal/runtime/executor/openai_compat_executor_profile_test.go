@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,6 +263,60 @@ func TestOpenAICompatExecutorClaudeSourceNormalizesKimiToolReferences(t *testing
 	}
 	if gjson.GetBytes(gotBody, "tools.0.input_schema").Exists() {
 		t.Fatalf("input_schema should be converted away: %s", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorClaudeSourceDowngradesToolSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"glm-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("zhipu-provider", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name: "zhipu-provider",
+			Kind: "zhipu",
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "zhipu-provider",
+		"compat_kind": "zhipu",
+	}}
+
+	payload := []byte(`{
+		"model":"glm-4.6",
+		"max_tokens":1024,
+		"messages":[{"role":"user","content":[{"type":"text","text":"read it"}]}],
+		"tools":[
+			{"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"},
+			{"name":"mcp__files__read","description":"Read files","defer_loading":true,"input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-4.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := len(gjson.GetBytes(gotBody, "tools").Array()); got != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", got, string(gotBody))
+	}
+	if strings.HasPrefix(gjson.GetBytes(gotBody, "tools.0.function.name").String(), "tool_search_tool_") {
+		t.Fatalf("tool search tool should not reach upstream: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tools.0.function.name").String(); got != "mcp__files__read" {
+		t.Fatalf("tool name = %q, want mcp__files__read: %s", got, string(gotBody))
 	}
 }
 

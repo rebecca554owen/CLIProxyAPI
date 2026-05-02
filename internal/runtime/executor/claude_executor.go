@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -190,6 +191,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body = downgradeClaudeToolSearchForCompat(baseURL, body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -390,6 +392,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	body = downgradeClaudeToolSearchForCompat(baseURL, body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -594,6 +597,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
+	body = downgradeClaudeToolSearchForCompat(baseURL, body)
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
 
@@ -974,6 +978,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			}
 		}
 	}
+	if !isAnthropicBase {
+		baseBetas = filterClaudeBetasForCompat(baseBetas)
+	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
@@ -1025,6 +1032,28 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 }
 
+func filterClaudeBetasForCompat(raw string) string {
+	parts := strings.Split(raw, ",")
+	filtered := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, part := range parts {
+		beta := strings.TrimSpace(part)
+		if beta == "" {
+			continue
+		}
+		normalized := strings.ToLower(beta)
+		if strings.Contains(normalized, "tool-search") || strings.Contains(normalized, "tool_search") {
+			continue
+		}
+		if seen[beta] {
+			continue
+		}
+		filtered = append(filtered, beta)
+		seen[beta] = true
+	}
+	return strings.Join(filtered, ",")
+}
+
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
@@ -1069,6 +1098,194 @@ func downgradeClaudeStructuredOutputForCompat(baseURL string, body []byte) []byt
 		body, _ = sjson.DeleteBytes(body, "output_config")
 	}
 	return body
+}
+
+func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
+	if isOfficialAnthropicBaseURL(baseURL) || len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return body
+	}
+
+	changed := false
+	if tools, ok := root["tools"].([]any); ok {
+		cleanedTools := make([]any, 0, len(tools))
+		for _, rawTool := range tools {
+			tool, okTool := rawTool.(map[string]any)
+			if !okTool {
+				cleanedTools = append(cleanedTools, rawTool)
+				continue
+			}
+			toolType := strings.TrimSpace(compatStringValue(tool["type"]))
+			toolName := strings.TrimSpace(compatStringValue(tool["name"]))
+			if isClaudeToolSearchTool(toolType, toolName) {
+				changed = true
+				continue
+			}
+			if _, hasDeferLoading := tool["defer_loading"]; hasDeferLoading {
+				delete(tool, "defer_loading")
+				changed = true
+			}
+			cleanedTools = append(cleanedTools, tool)
+		}
+		if len(cleanedTools) == 0 {
+			delete(root, "tools")
+		} else {
+			root["tools"] = cleanedTools
+		}
+	}
+
+	if messages, ok := root["messages"].([]any); ok {
+		cleanedMessages := make([]any, 0, len(messages))
+		for _, rawMessage := range messages {
+			message, okMessage := rawMessage.(map[string]any)
+			if !okMessage {
+				cleanedMessages = append(cleanedMessages, rawMessage)
+				continue
+			}
+			content, okContent := message["content"].([]any)
+			if !okContent {
+				cleanedMessages = append(cleanedMessages, message)
+				continue
+			}
+			cleanedContent, contentChanged := downgradeClaudeToolSearchContent(content)
+			if contentChanged {
+				changed = true
+				if len(cleanedContent) == 0 {
+					continue
+				}
+				message["content"] = cleanedContent
+			}
+			cleanedMessages = append(cleanedMessages, message)
+		}
+		root["messages"] = cleanedMessages
+	}
+
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return body
+	}
+	log.WithField("compat_kind", config.InferCompatKindFromBaseURL(baseURL)).Debug("downgraded Claude tool search payload for upstream compatibility")
+	return out
+}
+
+func isClaudeToolSearchTool(toolType string, toolName string) bool {
+	return strings.HasPrefix(toolType, "tool_search_tool_") || strings.HasPrefix(toolName, "tool_search_tool_")
+}
+
+func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
+	cleaned := make([]any, 0, len(content))
+	changed := false
+	for _, rawPart := range content {
+		part, okPart := rawPart.(map[string]any)
+		if !okPart {
+			cleaned = append(cleaned, rawPart)
+			continue
+		}
+		partType := strings.TrimSpace(compatStringValue(part["type"]))
+		switch {
+		case partType == "server_tool_use":
+			changed = true
+			continue
+		case partType == "tool_search_tool_result":
+			changed = true
+			if text := claudeToolSearchResultText(part); text != "" {
+				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
+			}
+			continue
+		case partType == "tool_reference":
+			changed = true
+			if text := claudeToolReferenceText(part); text != "" {
+				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
+			}
+			continue
+		case partType == "tool_result":
+			if updated, updatedChanged := downgradeClaudeToolResultReferences(part); updatedChanged {
+				cleaned = append(cleaned, updated)
+				changed = true
+				continue
+			}
+		}
+		cleaned = append(cleaned, part)
+	}
+	return cleaned, changed
+}
+
+func downgradeClaudeToolResultReferences(part map[string]any) (map[string]any, bool) {
+	content, ok := part["content"]
+	if !ok {
+		return part, false
+	}
+	if nested, okNested := content.([]any); okNested {
+		cleaned := make([]any, 0, len(nested))
+		changed := false
+		for _, rawNested := range nested {
+			nestedPart, okPart := rawNested.(map[string]any)
+			if !okPart || strings.TrimSpace(compatStringValue(nestedPart["type"])) != "tool_reference" {
+				cleaned = append(cleaned, rawNested)
+				continue
+			}
+			changed = true
+			if text := claudeToolReferenceText(nestedPart); text != "" {
+				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
+			}
+		}
+		if !changed {
+			return part, false
+		}
+		part["content"] = cleaned
+		return part, true
+	}
+	if nestedPart, okNested := content.(map[string]any); okNested && strings.TrimSpace(compatStringValue(nestedPart["type"])) == "tool_reference" {
+		if text := claudeToolReferenceText(nestedPart); text != "" {
+			part["content"] = []any{map[string]any{"type": "text", "text": text}}
+		} else {
+			part["content"] = []any{}
+		}
+		return part, true
+	}
+	return part, false
+}
+
+func claudeToolSearchResultText(part map[string]any) string {
+	names := make([]string, 0)
+	collectToolReferenceNames(part["content"], &names)
+	if len(names) == 0 {
+		return ""
+	}
+	return "Tool search discovered: " + strings.Join(names, ", ")
+}
+
+func claudeToolReferenceText(part map[string]any) string {
+	name := strings.TrimSpace(compatStringValue(part["tool_name"]))
+	if name == "" {
+		return ""
+	}
+	return "Tool reference: " + name
+}
+
+func collectToolReferenceNames(value any, names *[]string) {
+	switch v := value.(type) {
+	case map[string]any:
+		if strings.TrimSpace(compatStringValue(v["type"])) == "tool_reference" {
+			if name := strings.TrimSpace(compatStringValue(v["tool_name"])); name != "" {
+				*names = append(*names, name)
+			}
+		}
+		for _, child := range v {
+			collectToolReferenceNames(child, names)
+		}
+	case []any:
+		for _, child := range v {
+			collectToolReferenceNames(child, names)
+		}
+	}
 }
 
 func isOfficialAnthropicBaseURL(rawBaseURL string) bool {

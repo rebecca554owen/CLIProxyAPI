@@ -1127,6 +1127,62 @@ func TestSanitizeClaudeToolNamesForUpstream_RewritesAndRestores(t *testing.T) {
 	}
 }
 
+func TestDowngradeClaudeToolSearchForCompat(t *testing.T) {
+	payload := []byte(`{
+		"tools":[
+			{"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"},
+			{"name":"mcp__files__read","description":"Read files","defer_loading":true,"input_schema":{"type":"object"}}
+		],
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_regex","input":{"query":"read"}},
+				{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"mcp__files__read"}]}},
+				{"type":"tool_reference","tool_name":"mcp__files__read"},
+				{"type":"tool_use","id":"toolu_1","name":"mcp__files__read","input":{"path":"README.md"}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"mcp__files__read"},{"type":"text","text":"ok"}]}]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://api.kimi.com/coding", payload)
+
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.defer_loading").Exists() {
+		t.Fatalf("defer_loading should be removed: %s", string(out))
+	}
+	for _, partType := range []string{"server_tool_use", "tool_search_tool_result", "tool_reference"} {
+		if gjson.GetBytes(out, `messages.0.content.#(type=="`+partType+`")`).Exists() {
+			t.Fatalf("%s should be downgraded away: %s", partType, string(out))
+		}
+	}
+	if got := gjson.GetBytes(out, `messages.0.content.#(type=="tool_use").name`).String(); got != "mcp__files__read" {
+		t.Fatalf("tool_use name = %q, want mcp__files__read: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.0.type").String(); got != "text" {
+		t.Fatalf("nested tool_reference should become text, got %q: %s", got, string(out))
+	}
+}
+
+func TestDowngradeClaudeToolSearchForCompatSkipsOfficialAnthropic(t *testing.T) {
+	payload := []byte(`{"tools":[{"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"}]}`)
+	out := downgradeClaudeToolSearchForCompat("https://api.anthropic.com", payload)
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("official Anthropic payload should not be changed: %s", string(out))
+	}
+}
+
+func TestFilterClaudeBetasForCompatDropsToolSearch(t *testing.T) {
+	out := filterClaudeBetasForCompat("claude-code-20250219, tool-search-2025-11-19,tool_search_tool_regex_20251119,oauth-2025-04-20")
+	if strings.Contains(out, "tool-search") || strings.Contains(out, "tool_search") {
+		t.Fatalf("tool search betas should be removed, got %q", out)
+	}
+	if !strings.Contains(out, "claude-code-20250219") || !strings.Contains(out, "oauth-2025-04-20") {
+		t.Fatalf("unrelated betas should be preserved, got %q", out)
+	}
+}
+
 func TestSanitizeClaudeToolNamesForUpstream_AvoidsCollisions(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"skill_pet_animals"},{"name":"skill:pet_animals"}]}`)
 

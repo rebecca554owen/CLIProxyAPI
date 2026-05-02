@@ -99,9 +99,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	payloadSource := req.Payload
+	if from.String() == "claude" {
+		originalPayloadSource = downgradeClaudeToolSearchForCompat(baseURL, originalPayloadSource)
+		payloadSource = downgradeClaudeToolSearchForCompat(baseURL, payloadSource)
+	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, payloadSource, opts.Stream)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 	if opts.Alt == "responses/compact" {
@@ -209,9 +214,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	payloadSource := req.Payload
+	if from.String() == "claude" {
+		originalPayloadSource = downgradeClaudeToolSearchForCompat(baseURL, originalPayloadSource)
+		payloadSource = downgradeClaudeToolSearchForCompat(baseURL, payloadSource)
+	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, payloadSource, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 
